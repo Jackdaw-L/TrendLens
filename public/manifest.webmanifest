@@ -1,0 +1,20 @@
+{
+  "name": "TrendLens",
+  "short_name": "TrendLens",
+  "description": "个人化科技、互联网与 LLM 趋势雷达",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f6f1",
+  "theme_color": "#f7f6f1",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/trendlens-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "news", "utilities"],
+  "lang": "zh-CN"
+}

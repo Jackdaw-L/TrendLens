@@ -1,0 +1,81 @@
+sources:
+  - id: openai
+    name: OpenAI News
+    url: https://openai.com/news/rss.xml
+    category: official
+    language: en
+    weight: 1.4
+    enabled: true
+    fetch_interval: daily
+  - id: google-deepmind
+    name: Google DeepMind Blog
+    url: https://deepmind.google/blog/rss.xml
+    category: official
+    language: en
+    weight: 1.4
+    enabled: true
+    fetch_interval: daily
+  - id: google-research
+    name: Google Research Blog
+    url: https://research.google/blog/rss/
+    category: official
+    language: en
+    weight: 1.3
+    enabled: true
+    fetch_interval: daily
+  - id: huggingface
+    name: Hugging Face Blog
+    url: https://huggingface.co/blog/feed.xml
+    category: official
+    language: en
+    weight: 1.3
+    enabled: true
+    fetch_interval: daily
+  - id: simon-willison
+    name: Simon Willison
+    url: https://simonwillison.net/atom/everything/
+    category: analysis
+    language: en
+    weight: 1.3
+    enabled: true
+    fetch_interval: daily
+  - id: interconnects
+    name: Interconnects
+    url: https://www.interconnects.ai/feed
+    category: analysis
+    language: en
+    weight: 1.3
+    enabled: true
+    fetch_interval: daily
+  - id: latent-space
+    name: Latent Space
+    url: https://www.latent.space/feed
+    category: analysis
+    language: en
+    weight: 1.2
+    enabled: true
+    fetch_interval: daily
+  - id: one-useful-thing
+    name: One Useful Thing
+    url: https://www.oneusefulthing.org/feed
+    category: analysis
+    language: en
+    weight: 1.2
+    enabled: true
+    fetch_interval: daily
+  - id: producthunt
+    name: Product Hunt
+    url: https://www.producthunt.com/feed
+    category: product
+    language: en
+    weight: 1
+    enabled: true
+    fetch_interval: daily
+  - id: aihot-virxact
+    name: AI Hot
+    url: https://aihot.virxact.com/feed/all.xml
+    category: media
+    language: zh
+    weight: 1
+    enabled: true
+    fetch_interval: daily
