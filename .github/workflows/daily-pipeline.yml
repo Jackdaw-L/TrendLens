@@ -67,10 +67,14 @@ jobs:
         run: npm run pipeline
 
       - name: Revalidate Netlify app cache
-        if: ${{ secrets.TRENDLENS_REVALIDATE_URL != '' && secrets.TRENDLENS_REVALIDATE_TOKEN != '' }}
         env:
           TRENDLENS_REVALIDATE_URL: ${{ secrets.TRENDLENS_REVALIDATE_URL }}
           TRENDLENS_REVALIDATE_TOKEN: ${{ secrets.TRENDLENS_REVALIDATE_TOKEN }}
         run: |
+          if [ -z "$TRENDLENS_REVALIDATE_URL" ] || [ -z "$TRENDLENS_REVALIDATE_TOKEN" ]; then
+            echo "Skipping revalidation because TRENDLENS_REVALIDATE_URL or TRENDLENS_REVALIDATE_TOKEN is not configured."
+            exit 0
+          fi
+
           curl -fsS -X POST "$TRENDLENS_REVALIDATE_URL" \
             -H "authorization: Bearer $TRENDLENS_REVALIDATE_TOKEN"
