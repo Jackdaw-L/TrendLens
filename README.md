@@ -1,132 +1,115 @@
 # TrendLens
 
-TrendLens is a mobile-first Next.js PWA for reading personalized technology, internet, and LLM trend signals on iPhone.
+TrendLens 是一个面向 iPhone 阅读的科技资讯处理应用。它不是普通 RSS 阅读器，而是把「科技 / 互联网 / 大模型」信息源先经过抓取、正文抽取、AI 选文、中文转写和 PM 视角标注，再呈现成每天大约 10 篇值得读的推荐文章。
 
-The current build reads generated radar data from Supabase, falls back to `data/radar.json`, and then falls back to local demo data when the RSS/DeepSeek pipeline has not run:
+## 产品形态
 
-- Today dashboard with a single `科技 / 互联网 / 大模型` channel and a direct list of processed article recommendations.
-- Article cards with source, 0-100 heat score, recommendation reason, reading time, read state, and favorites.
-- Article detail pages with faithful Chinese article transfer, source images, short source quotes, PM takeaways, related reading, and annotation bottom sheets.
-- Saved page with local favorite state.
-- Settings page with source/model status, source enable/disable and delete management backed by Supabase, plus a password-protected “更新推荐” action that dispatches GitHub Actions.
-- PWA manifest, safe-area layout, Stitch-sourced app icon, and a production service worker shell.
-- RSS pipeline with article extraction, DeepSeek generation, Supabase persistence, and local fallback status reporting.
+- 首页：展示当日处理后的推荐文章列表，每篇文章带来源、热度、AI 推荐语和阅读状态。
+- 文章详情：展示忠实中文转写、原文图片、术语注释、AI 推荐语、PM Takeaways、收藏、分享和跳转原文。
+- 收藏页：读取本地收藏状态，方便回看。
+- 设置页：查看系统状态，管理 RSS 信息源，并通过「更新推荐」手动触发一次完整更新。
+- PWA：适合在 iPhone Safari 中添加到主屏幕使用。
 
-## Run
+## 数据流程
+
+TrendLens 的内容生产链路在 `scripts/pipeline.mjs`：
+
+1. 从 Supabase 的 `trendlens_sources` 读取启用的信息源，失败时回退到 `sources.yaml`。
+2. 拉取 RSS item，并尽量抓取原文 HTML。
+3. 用 Readability 抽取正文和图片。
+4. 调用 DeepSeek 做两段处理：
+   - selection：从候选文章中选出推荐列表。
+   - rewrite：逐篇做忠实中文转写、注释、图片位置和 PM Takeaways。
+5. 写入 Supabase：
+   - `trendlens_radar_runs`
+   - `trendlens_articles`
+   - `trendlens_fetched_articles`
+6. 线上应用读取 Supabase 最新 run；若不可用，回退到 `data/radar.json`，再回退到内置 demo 数据。
+
+## 代码结构
+
+```text
+src/app/
+  page.tsx                 首页
+  saved/page.tsx           收藏页
+  settings/page.tsx        设置页
+  articles/[id]/page.tsx   文章详情页
+  api/radar/route.ts       获取最新推荐数据
+  api/sources/route.ts     信息源启停、删除
+  api/recommendations/     触发 GitHub Actions 更新推荐
+  api/revalidate/          更新完成后清 Next/Netlify 缓存
+
+src/components/
+  app-chrome.tsx           顶部栏、底部导航、通用按钮
+  home-screen.tsx          首页信息流
+  article-screen.tsx       文章详情阅读体验
+  saved-screen.tsx         收藏列表
+  settings-screen.tsx      设置和信息源管理
+  lazy-image.tsx           图片懒加载与占位
+  use-reading-state.ts     本地阅读/收藏状态
+
+src/lib/
+  radar-store.ts           从 Supabase、本地 JSON、demo 加载推荐数据
+  source-store.ts          信息源读取和管理
+  supabase-server.ts       Supabase admin client
+  radar-data.ts            demo 数据与类型定义
+
+scripts/
+  pipeline.mjs             RSS 抓取、DeepSeek 处理、Supabase 写入
+
+prompts/
+  friday-select-*.md       选文 prompt
+  friday-rewrite-*.md      中文转写 prompt
+
+supabase/
+  schema.sql               当前数据表结构
+```
+
+## 本地开发
 
 ```bash
+npm install
 npm run dev -- --hostname 0.0.0.0
 ```
 
-Open `http://localhost:3000` on the Mac, or use the Mac's LAN IP from iPhone Safari and add it to the Home Screen.
+电脑上访问 `http://localhost:3000`。手机和电脑在同一网络下时，可以用电脑局域网 IP 在 iPhone Safari 打开并添加到主屏幕。
 
-## Data pipeline
-
-```bash
-npm run fetch      # fetch RSS and extracted article text, then persist fallback data
-npm run generate   # call DeepSeek using the last fetched articles
-npm run pipeline   # fetch RSS, call DeepSeek, and persist the radar dataset
-```
-
-DeepSeek runs in two stages. Prompts are file-based so each stage can be tuned without editing code:
-
-- Selection: `prompts/friday-select-system.md` and `prompts/friday-select-user.md`
-- Chinese transfer: `prompts/friday-rewrite-system.md` and `prompts/friday-rewrite-user.md`
-
-The selection prompt receives candidates through `{{articles_json}}` and `{{max_articles}}`. The article-transfer prompt receives selected articles through `{{selected_articles_json}}`; it runs one article at a time, receives extracted `sourceImages`, writes raw model-return logs to `data/logs/deepseek-rewrite-*.json`, retries incomplete output, and records failed articles in `rewriteFailures` instead of silently falling back to extracted source text.
-
-For a quick smoke run:
-
-```bash
-SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
-```
-
-## Checks
+常用检查：
 
 ```bash
 npm run lint
 npm run build
 ```
 
-## Netlify
+## 内容更新
 
-TrendLens can be deployed as a Netlify Next.js site. The project includes:
-
-- `netlify.toml` for the build command, `.next` publish directory, manifest header, and Node version.
-- `.nvmrc` and `.node-version` pinned to Node `24.14.0`.
-- `package.json` `engines.node` set to `24.x`.
-
-Configure these Netlify environment variables before deploying:
+本地可以直接跑完整流水线：
 
 ```bash
-SUPABASE_URL=https://vbwzcvycobnpohetvjjd.supabase.co
-SUPABASE_SECRET_KEY=
-DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_API_KEY=
-DEEPSEEK_THINKING=disabled
-DEEPSEEK_MAX_TOKENS=12000
+npm run pipeline
 ```
 
-The deployed Netlify app reads the latest run from Supabase. The long RSS/DeepSeek pipeline is intended to run in GitHub Actions and write new runs into Supabase.
-
-## GitHub Actions automation
-
-`.github/workflows/daily-pipeline.yml` runs the full pipeline every day at 08:00 Asia/Shanghai and also supports manual `workflow_dispatch`.
-
-Configure these GitHub repository secrets before enabling the workflow:
+快速 smoke run：
 
 ```bash
-DEEPSEEK_API_KEY=
-SUPABASE_URL=https://vbwzcvycobnpohetvjjd.supabase.co
-SUPABASE_SECRET_KEY=
-TRENDLENS_REVALIDATE_URL=https://trendlensapp.netlify.app/api/revalidate
-TRENDLENS_REVALIDATE_TOKEN=
+SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
 ```
 
-Configure these Netlify environment variables so the Settings page can trigger the workflow:
+线上日更由 `.github/workflows/daily-pipeline.yml` 托管：每天北京时间 08:00 自动运行，也可以在设置页输入口令触发。工作流完成后会调用 `/api/revalidate`，让页面尽快读取 Supabase 中的新结果。
 
-```bash
-GITHUB_ACTIONS_TOKEN=
-GITHUB_ACTIONS_REPO=Jackdaw-L/TrendLens
-GITHUB_ACTIONS_WORKFLOW=daily-pipeline.yml
-GITHUB_ACTIONS_REF=main
-TRENDLENS_TRIGGER_SECRET=coffee
-TRENDLENS_REVALIDATE_TOKEN=
-```
+## Prompt 调优
 
-`GITHUB_ACTIONS_TOKEN` should be a GitHub token that can dispatch workflows for this repository. `TRENDLENS_REVALIDATE_TOKEN` must match between GitHub secrets and Netlify env vars so Actions can clear the Netlify/Next cache after a successful run.
+LLM prompt 独立放在 `prompts/`，方便不改代码直接调：
 
-## Config
+- `friday-select-system.md` / `friday-select-user.md`：决定哪些文章值得推荐。
+- `friday-rewrite-system.md` / `friday-rewrite-user.md`：决定中文转写、术语注释、图片插入和 PM Takeaways 的输出结构。
 
-Defaults live in `.env.example`; create `.env` when overriding local pipeline settings:
+模型原始返回日志会写到 `data/logs/deepseek-rewrite-*.json`，该目录不会提交到 Git。
 
-```bash
-DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_API_KEY=
-DEEPSEEK_THINKING=disabled
-DEEPSEEK_ATTEMPTS=2
-DEEPSEEK_TIMEOUT_MS=180000
-SUPABASE_URL=https://vbwzcvycobnpohetvjjd.supabase.co
-SUPABASE_SECRET_KEY=
-LLM_CANDIDATE_ARTICLES=24
-LLM_MAX_ARTICLES=8
-LLM_SELECT_CONTENT_CHARS=900
-FRIDAY_REWRITE_ATTEMPTS=2
-FRIDAY_REWRITE_CONTENT_CHARS=12000
-FRIDAY_REWRITE_MIN_CHINESE_CHARS=800
-FRIDAY_MIN_CONTENT_CHARS=600
-LLM_SELECT_SYSTEM_PROMPT_PATH=prompts/friday-select-system.md
-LLM_SELECT_USER_PROMPT_PATH=prompts/friday-select-user.md
-LLM_REWRITE_SYSTEM_PROMPT_PATH=prompts/friday-rewrite-system.md
-LLM_REWRITE_USER_PROMPT_PATH=prompts/friday-rewrite-user.md
-GITHUB_ACTIONS_REPO=Jackdaw-L/TrendLens
-GITHUB_ACTIONS_WORKFLOW=daily-pipeline.yml
-GITHUB_ACTIONS_REF=main
-TRENDLENS_TRIGGER_SECRET=coffee
-TRENDLENS_REVALIDATE_URL=https://trendlensapp.netlify.app/api/revalidate
-TRENDLENS_REVALIDATE_TOKEN=
-```
+## 继续开发时优先看哪里
 
-RSS source defaults live in Supabase table `trendlens_sources`; `sources.yaml` seeds/falls back locally.
+- 想改页面样式：先看 `src/app/globals.css`，再看对应 `src/components/*-screen.tsx`。
+- 想改文章详情体验：看 `src/components/article-screen.tsx`。
+- 想改推荐策略：优先改 `prompts/friday-select-*.md`。
+- 想改转写结构：优先改 `prompts/friday-rewrite-*.md` 和 `scripts/pipeline.mjs` 的校验逻辑。
+- 想改信息源管理：看 `src/lib/source-store.ts` 和 `src/app/api/sources/route.ts`。

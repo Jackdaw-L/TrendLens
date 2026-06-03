@@ -219,6 +219,10 @@ svg {
     calc(92px + env(safe-area-inset-bottom));
 }
 
+.article-shell .app-safe {
+  padding-top: calc(14px + env(safe-area-inset-top));
+}
+
 .top-app-bar,
 .article-top-bar,
 .bottom-nav,
@@ -241,6 +245,18 @@ svg {
   padding: calc(12px + env(safe-area-inset-top)) 20px 10px;
   background: rgba(249, 249, 247, 0.86);
   backdrop-filter: blur(18px);
+}
+
+.article-shell .article-top-bar {
+  position: relative;
+  left: auto;
+  width: 100%;
+  min-height: 68px;
+  margin-bottom: 24px;
+  padding: 0;
+  transform: none;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .top-app-bar strong,
@@ -836,12 +852,6 @@ svg {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.4;
-}
-
-.toolbar-button.is-primary {
-  background: rgba(214, 231, 213, 0.42);
-  color: var(--tertiary-container);
-  font-weight: 800;
 }
 
 .toolbar-button.is-active {

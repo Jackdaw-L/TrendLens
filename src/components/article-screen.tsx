@@ -72,7 +72,7 @@ export function ArticleScreen({
 
   return (
     <AppShell
-      className={activeAnnotation ? "sheet-open" : ""}
+      className={`article-shell ${activeAnnotation ? "sheet-open" : ""}`}
       footer={
         <div className="article-toolbar" aria-label="阅读工具">
           <button
@@ -91,7 +91,7 @@ export function ArticleScreen({
             {shareStatus === "done" ? <CheckCircle2 aria-hidden size={21} /> : <Share2 aria-hidden size={21} />}
             <span>{shareStatus === "done" ? "已分享" : "分享"}</span>
           </button>
-          <a className="toolbar-button is-primary" href={article.originalUrl} rel="noreferrer" target="_blank">
+          <a className="toolbar-button" href={article.originalUrl} rel="noreferrer" target="_blank">
             <ExternalLink aria-hidden size={21} />
             <span>原文</span>
           </a>
