@@ -31,14 +31,6 @@ sources:
     weight: 1.3
     enabled: true
     fetch_interval: daily
-  - id: simon-willison
-    name: Simon Willison
-    url: https://simonwillison.net/atom/everything/
-    category: analysis
-    language: en
-    weight: 1.3
-    enabled: true
-    fetch_interval: daily
   - id: interconnects
     name: Interconnects
     url: https://www.interconnects.ai/feed

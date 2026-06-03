@@ -752,7 +752,6 @@ export const sourceStats = [
   { id: "openai", name: "OpenAI News", category: "official", weight: 1.4, status: "ok" },
   { id: "google-deepmind", name: "Google DeepMind", category: "official", weight: 1.4, status: "ok" },
   { id: "huggingface", name: "Hugging Face", category: "official", weight: 1.3, status: "ok" },
-  { id: "simon-willison", name: "Simon Willison", category: "analysis", weight: 1.3, status: "ok" },
   { id: "latent-space", name: "Latent Space", category: "analysis", weight: 1.2, status: "ok" },
   { id: "one-useful-thing", name: "One Useful Thing", category: "analysis", weight: 1.2, status: "ok" },
   { id: "producthunt", name: "Product Hunt", category: "product", weight: 1, status: "ok" },
@@ -791,6 +790,5 @@ export const generationStatus = {
   recommendedCount: articles.length,
   trendCount: topics.length,
   parseFailureRate: "12%",
-  fridayModel: "deepseek-v3-friday",
-  fridayAppId: "1637742221455659024",
+  model: "deepseek-v4-pro",
 };

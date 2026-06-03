@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Plus, RefreshCcw, Rss, Trash2 } from "lucide-react";
+import { useMemo, useState, useTransition, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { Plus, RefreshCcw, Rss, Trash2, X } from "lucide-react";
 import {
   AppShell,
   RefreshButton,
@@ -27,10 +28,15 @@ export function SettingsScreen({
   dataset: RadarDataset;
   initialSources: SourceConfig[];
 }) {
+  const router = useRouter();
   const reading = useReadingState();
   const [sources, setSources] = useState(initialSources);
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [isRecommendationDialogOpen, setRecommendationDialogOpen] = useState(false);
+  const [recommendationSecret, setRecommendationSecret] = useState("");
+  const [isTriggeringRecommendation, setTriggeringRecommendation] = useState(false);
+  const [isRefreshing, startRefreshTransition] = useTransition();
   const runtimeById = useMemo(() => {
     return new Map(dataset.sources.map(normalizeRuntimeSource).map((source) => [source.id, source]));
   }, [dataset.sources]);
@@ -82,9 +88,65 @@ export function SettingsScreen({
     }
   }
 
+  function refreshSettings() {
+    reading.markRefresh();
+    startRefreshTransition(() => router.refresh());
+  }
+
+  async function triggerRecommendationUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const secret = recommendationSecret.trim();
+    if (!secret) {
+      setFeedback("请输入更新口令");
+      return;
+    }
+
+    setTriggeringRecommendation(true);
+    setFeedback(null);
+
+    try {
+      const response = await fetch("/api/recommendations/trigger", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-trendlens-trigger-secret": secret,
+        },
+        body: JSON.stringify({ reason: "settings-button" }),
+      });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        missing?: string[];
+      };
+
+      if (!response.ok || !payload.ok) {
+        if (response.status === 401) {
+          setFeedback("口令不正确，请重新输入");
+          return;
+        }
+
+        if (payload.missing?.length) {
+          setFeedback(`更新推荐还没配置完整：${payload.missing.join("、")}`);
+          return;
+        }
+
+        setFeedback(payload.error || "启动更新失败，请稍后重试");
+        return;
+      }
+
+      setRecommendationDialogOpen(false);
+      setRecommendationSecret("");
+      setFeedback("已启动更新推荐，完成后首页会读取最新结果");
+    } catch {
+      setFeedback("启动更新失败，请稍后重试");
+    } finally {
+      setTriggeringRecommendation(false);
+    }
+  }
+
   return (
     <AppShell>
-      <TopAppBar action={<RefreshButton onClick={reading.markRefresh} />} />
+      <TopAppBar action={<RefreshButton busy={isRefreshing} onClick={refreshSettings} />} />
 
       <section className="page-heading">
         <h1>设置</h1>
@@ -99,9 +161,17 @@ export function SettingsScreen({
       </section>
 
       <div className="settings-actions">
-        <button className="primary-pill" onClick={reading.markRefresh} type="button">
+        <button
+          className="primary-pill"
+          onClick={() => {
+            setFeedback(null);
+            setRecommendationSecret("");
+            setRecommendationDialogOpen(true);
+          }}
+          type="button"
+        >
           <RefreshCcw aria-hidden size={18} />
-          手动刷新
+          更新推荐
         </button>
       </div>
 
@@ -163,6 +233,73 @@ export function SettingsScreen({
           新增信息源
         </button>
       </section>
+
+      {isRecommendationDialogOpen && (
+        <div
+          className="dialog-scrim"
+          onClick={() => {
+            if (!isTriggeringRecommendation) setRecommendationDialogOpen(false);
+          }}
+        >
+          <form
+            aria-labelledby="recommendation-dialog-title"
+            className="password-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={triggerRecommendationUpdate}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="dialog-title-row">
+              <div>
+                <h2 id="recommendation-dialog-title">更新推荐</h2>
+                <p>输入口令后，将启动一次 RSS 拉取、DeepSeek 选文和全文转写。</p>
+              </div>
+              <button
+                aria-label="关闭"
+                className="sheet-close"
+                disabled={isTriggeringRecommendation}
+                onClick={() => setRecommendationDialogOpen(false)}
+                type="button"
+              >
+                <X aria-hidden size={18} />
+              </button>
+            </div>
+
+            <label className="password-field">
+              <span>口令</span>
+              <input
+                autoComplete="off"
+                autoFocus
+                disabled={isTriggeringRecommendation}
+                onChange={(event) => setRecommendationSecret(event.target.value)}
+                placeholder="请输入口令"
+                type="password"
+                value={recommendationSecret}
+              />
+            </label>
+
+            <div className="dialog-actions">
+              <button
+                className="secondary-pill"
+                disabled={isTriggeringRecommendation}
+                onClick={() => setRecommendationDialogOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                aria-busy={isTriggeringRecommendation}
+                className="primary-pill"
+                disabled={isTriggeringRecommendation}
+                type="submit"
+              >
+                <RefreshCcw aria-hidden size={18} />
+                {isTriggeringRecommendation ? "启动中" : "确认更新"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </AppShell>
   );
 }
@@ -201,7 +338,7 @@ function countFetched(dataset: RadarDataset) {
 }
 
 function modelStatusText(status: RadarDataset["status"]["friday"]) {
-  if (status === "ok") return "Friday";
+  if (status === "ok") return "DeepSeek";
   if (status === "partial") return "部分成功";
   if (status === "failed") return "失败";
   return "待生成";

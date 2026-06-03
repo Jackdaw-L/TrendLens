@@ -1,0 +1,76 @@
+name: Update TrendLens recommendations
+
+on:
+  schedule:
+    # 08:00 Asia/Shanghai. GitHub cron uses UTC.
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this run was started
+        required: false
+        default: manual
+      source:
+        description: Trigger source
+        required: false
+        default: github
+      triggered_at:
+        description: Client trigger timestamp
+        required: false
+        default: ""
+
+concurrency:
+  group: trendlens-pipeline
+  cancel-in-progress: false
+
+jobs:
+  update-recommendations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEEPSEEK_API_URL: https://api.deepseek.com/chat/completions
+      DEEPSEEK_MODEL: deepseek-v4-pro
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_THINKING: disabled
+      DEEPSEEK_MAX_TOKENS: "12000"
+      DEEPSEEK_ATTEMPTS: "2"
+      DEEPSEEK_TIMEOUT_MS: "180000"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      MAX_ITEMS_PER_SOURCE: "5"
+      FETCH_ATTEMPTS: "3"
+      LLM_CANDIDATE_ARTICLES: "24"
+      LLM_MAX_ARTICLES: "10"
+      LLM_SELECT_CONTENT_CHARS: "900"
+      FRIDAY_REWRITE_ATTEMPTS: "3"
+      FRIDAY_REWRITE_CONTENT_CHARS: "12000"
+      FRIDAY_REWRITE_MIN_CHINESE_CHARS: "800"
+      FRIDAY_MIN_CONTENT_CHARS: "400"
+      LLM_SELECT_SYSTEM_PROMPT_PATH: prompts/friday-select-system.md
+      LLM_SELECT_USER_PROMPT_PATH: prompts/friday-select-user.md
+      LLM_REWRITE_SYSTEM_PROMPT_PATH: prompts/friday-rewrite-system.md
+      LLM_REWRITE_USER_PROMPT_PATH: prompts/friday-rewrite-user.md
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run RSS, selection, rewrite, and Supabase persistence
+        run: npm run pipeline
+
+      - name: Revalidate Netlify app cache
+        if: ${{ secrets.TRENDLENS_REVALIDATE_URL != '' && secrets.TRENDLENS_REVALIDATE_TOKEN != '' }}
+        env:
+          TRENDLENS_REVALIDATE_URL: ${{ secrets.TRENDLENS_REVALIDATE_URL }}
+          TRENDLENS_REVALIDATE_TOKEN: ${{ secrets.TRENDLENS_REVALIDATE_TOKEN }}
+        run: |
+          curl -fsS -X POST "$TRENDLENS_REVALIDATE_URL" \
+            -H "authorization: Bearer $TRENDLENS_REVALIDATE_TOKEN"

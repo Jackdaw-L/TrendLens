@@ -1,10 +1,7 @@
-const CACHE_NAME = "trendlens-shell-v1";
+const CACHE_NAME = "trendlens-shell-v3";
 const SHELL_ROUTES = [
-  "/",
-  "/saved",
-  "/settings",
   "/manifest.webmanifest",
-  "/trendlens-icon.svg"
+  "/trendlens-icon.png"
 ];
 
 self.addEventListener("install", (event) => {
@@ -28,13 +25,29 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
 
+  const url = new URL(event.request.url);
+  const isSameOrigin = url.origin === self.location.origin;
+  const isApi = isSameOrigin && url.pathname.startsWith("/api/");
+  const isRsc = url.searchParams.has("_rsc");
+  const isNavigate = event.request.mode === "navigate";
+
+  if (isApi || isRsc || isNavigate) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
+  if (!isSameOrigin) return;
+
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
+    caches.match(event.request).then((cached) => {
+      if (cached) return cached;
+
+      return fetch(event.request).then((response) => {
+        if (!response.ok) return response;
         const copy = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
         return response;
-      })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
+      });
+    })
   );
 });

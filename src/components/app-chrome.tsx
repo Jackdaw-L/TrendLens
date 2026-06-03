@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -8,7 +9,6 @@ import {
   ExternalLink,
   Heart,
   Home,
-  Rss,
   Settings,
   Sparkles,
   RefreshCcw,
@@ -25,7 +25,7 @@ export function AppShell({ children, footer, className = "" }: AppShellProps) {
   return (
     <main className={`app-shell ${className}`}>
       <div className="app-frame">
-        <div className="app-safe">{children}</div>
+        <div className="app-safe page-transition">{children}</div>
         {footer ?? <BottomNav />}
       </div>
     </main>
@@ -42,7 +42,7 @@ export function TopAppBar({
   return (
     <header className="top-app-bar">
       <div className="brand-mark" aria-hidden>
-        <Rss size={18} />
+        <Image alt="" height={40} priority src="/trendlens-icon.png" width={40} />
       </div>
       <strong>{title}</strong>
       <div className="top-app-bar__action">{action}</div>
@@ -97,6 +97,7 @@ export function BottomNav() {
             className={`bottom-nav__item ${item.active ? "is-active" : ""}`}
             href={item.href}
             key={item.href}
+            prefetch
           >
             <Icon
               aria-hidden
@@ -112,9 +113,16 @@ export function BottomNav() {
   );
 }
 
-export function RefreshButton({ onClick }: { onClick: () => void }) {
+export function RefreshButton({ busy = false, onClick }: { busy?: boolean; onClick: () => void }) {
   return (
-    <button className="round-icon-button" onClick={onClick} type="button" aria-label="刷新">
+    <button
+      aria-busy={busy}
+      aria-label="刷新"
+      className={`round-icon-button ${busy ? "is-spinning" : ""}`}
+      disabled={busy}
+      onClick={onClick}
+      type="button"
+    >
       <RefreshCcw aria-hidden size={18} />
     </button>
   );
@@ -161,6 +169,7 @@ export function ExternalLinkLabel({ href }: { href: string }) {
 
 export function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

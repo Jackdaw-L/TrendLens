@@ -6,6 +6,7 @@ import Parser from "rss-parser";
 import YAML from "yaml";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { createClient } from "@supabase/supabase-js";
 
 const cwd = process.cwd();
 const dataDir = path.join(cwd, "data");
@@ -38,11 +39,12 @@ const env = await loadEnv();
 
 const sourceLimit = Number(cli["source-limit"] ?? env.SOURCE_LIMIT ?? 0);
 const itemLimit = Number(cli.limit ?? env.MAX_ITEMS_PER_SOURCE ?? 3);
-const fridayMaxArticles = Number(env.FRIDAY_MAX_ARTICLES ?? 8);
-const fridayCandidateArticles = Number(
+const modelMaxArticles = Number(env.LLM_MAX_ARTICLES ?? env.FRIDAY_MAX_ARTICLES ?? 8);
+const modelCandidateArticles = Number(
   cli["candidate-limit"] ??
+    env.LLM_CANDIDATE_ARTICLES ??
     env.FRIDAY_CANDIDATE_ARTICLES ??
-    Math.max(fridayMaxArticles * 3, fridayMaxArticles),
+    Math.max(modelMaxArticles * 3, modelMaxArticles),
 );
 
 await fs.mkdir(dataDir, { recursive: true });
@@ -54,21 +56,24 @@ if (command === "fetch") {
   const radar = buildFallbackRadar(fetched, {
     mode: "fetched",
     fridayStatus: "skipped",
-    fridayError: "未执行 Friday 生成；请运行 npm run pipeline。",
+    fridayError: "未执行 DeepSeek 生成；请运行 npm run pipeline。",
   });
   await writeJson(radarPath, radar);
-  printSummary("fetch", radar);
+  const storage = await persistPipelineResult({ fetched, radar });
+  printSummary("fetch", radar, storage);
 } else if (command === "generate") {
-  const fetched = await readJson(fetchedPath);
-  const radar = await generateRadar(fetched, { fridayMaxArticles, fridayCandidateArticles });
+  const fetched = await readFetchedDataset();
+  const radar = await generateRadar(fetched, { modelMaxArticles, modelCandidateArticles });
   await writeJson(radarPath, radar);
-  printSummary("generate", radar);
+  const storage = await persistPipelineResult({ fetched, radar });
+  printSummary("generate", radar, storage);
 } else if (command === "pipeline") {
   const fetched = await fetchAllSources({ sourceLimit, itemLimit });
   await writeJson(fetchedPath, fetched);
-  const radar = await generateRadar(fetched, { fridayMaxArticles, fridayCandidateArticles });
+  const radar = await generateRadar(fetched, { modelMaxArticles, modelCandidateArticles });
   await writeJson(radarPath, radar);
-  printSummary("pipeline", radar);
+  const storage = await persistPipelineResult({ fetched, radar });
+  printSummary("pipeline", radar, storage);
 } else {
   throw new Error(`Unknown command: ${command}`);
 }
@@ -110,9 +115,8 @@ async function loadEnv() {
 }
 
 async function fetchAllSources({ sourceLimit, itemLimit }) {
-  const sourcesYaml = await fs.readFile(path.join(cwd, "sources.yaml"), "utf8");
-  const config = YAML.parse(sourcesYaml);
-  const enabledSources = (config.sources ?? [])
+  const configSources = await loadPipelineSources();
+  const enabledSources = configSources
     .filter((source) => source.enabled !== false)
     .slice(0, sourceLimit > 0 ? sourceLimit : undefined);
 
@@ -168,6 +172,44 @@ async function fetchAllSources({ sourceLimit, itemLimit }) {
   }
 
   return fetched;
+}
+
+async function loadPipelineSources() {
+  const supabase = createSupabaseClientFromEnv();
+  if (supabase) {
+    try {
+      await ensureSupabaseSourcesSeeded(supabase);
+      const { data, error } = await supabase
+        .from("trendlens_sources")
+        .select("id,name,url,category,language,weight,enabled,fetch_interval")
+        .order("weight", { ascending: false })
+        .order("name", { ascending: true });
+
+      if (error) throw error;
+      if (Array.isArray(data) && data.length > 0) {
+        return data.map((source) => ({
+          id: String(source.id),
+          name: String(source.name),
+          url: String(source.url),
+          category: String(source.category),
+          language: source.language ? String(source.language) : undefined,
+          weight: source.weight == null ? undefined : Number(source.weight),
+          enabled: source.enabled == null ? undefined : Boolean(source.enabled),
+          fetch_interval: source.fetch_interval ? String(source.fetch_interval) : undefined,
+        }));
+      }
+    } catch (error) {
+      console.warn(`Failed to load sources from Supabase, falling back to sources.yaml: ${normalizeError(error)}`);
+    }
+  }
+
+  return loadSourceConfigsFromYaml();
+}
+
+async function loadSourceConfigsFromYaml() {
+  const sourcesYaml = await fs.readFile(path.join(cwd, "sources.yaml"), "utf8");
+  const config = YAML.parse(sourcesYaml);
+  return Array.isArray(config.sources) ? config.sources : [];
 }
 
 async function fetchArticleFromItem(item, source, canonicalUrl) {
@@ -451,12 +493,12 @@ function imageIdentity(value) {
   return url.replace(/([?&](w|h|width|height|format|q|fit|crop|auto|s)=[^&]+)/gi, "").replace(/[?#]$/, "");
 }
 
-async function generateRadar(fetched, { fridayMaxArticles, fridayCandidateArticles }) {
+async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles }) {
   const minContentChars = positiveInteger(env.FRIDAY_MIN_CONTENT_CHARS, 600);
   const usable = fetched.articles
     .filter((article) => article.title && normalizeText(article.content).length >= minContentChars)
     .sort((a, b) => (b.sourceWeight ?? 1) - (a.sourceWeight ?? 1))
-    .slice(0, fridayCandidateArticles);
+    .slice(0, modelCandidateArticles);
 
   if (usable.length === 0) {
     return buildFallbackRadar(fetched, {
@@ -466,19 +508,19 @@ async function generateRadar(fetched, { fridayMaxArticles, fridayCandidateArticl
     });
   }
 
-  if (!env.FRIDAY_APP_ID || !env.FRIDAY_API_URL || !env.FRIDAY_MODEL) {
+  if (!env.DEEPSEEK_API_KEY) {
     return buildFallbackRadar(fetched, {
       mode: "fetched",
       fridayStatus: "skipped",
-      fridayError: "缺少 FRIDAY_APP_ID / FRIDAY_API_URL / FRIDAY_MODEL 配置。",
+      fridayError: "缺少 DEEPSEEK_API_KEY 配置。",
     });
   }
 
   try {
-    const selection = await callFridayForSelection(usable, { maxArticles: fridayMaxArticles });
-    const normalizedSelection = normalizeSelection(selection, usable, fridayMaxArticles);
+    const selection = await callDeepSeekForSelection(usable, { maxArticles: modelMaxArticles });
+    const normalizedSelection = normalizeSelection(selection, usable, modelMaxArticles);
     const selectedSources = selectSourceArticles(normalizedSelection.articles, usable);
-    const rewrite = await callFridayForRewrite(normalizedSelection, selectedSources);
+    const rewrite = await callDeepSeekForRewrite(normalizedSelection, selectedSources);
     const generated = mergeSelectionAndRewrite(normalizedSelection, rewrite);
     return normalizeFridayRadar(generated, fetched, selectedSources, {
       rewriteFailures: rewrite.failures,
@@ -492,7 +534,8 @@ async function generateRadar(fetched, { fridayMaxArticles, fridayCandidateArticl
   }
 }
 
-async function callFridayForSelection(articles, { maxArticles }) {
+async function callDeepSeekForSelection(articles, { maxArticles }) {
+  const selectionContentChars = positiveInteger(env.LLM_SELECT_CONTENT_CHARS ?? env.FRIDAY_SELECT_CONTENT_CHARS, 900);
   const compactArticles = articles.map((article) => ({
     id: article.id,
     source: article.sourceName,
@@ -501,17 +544,17 @@ async function callFridayForSelection(articles, { maxArticles }) {
     url: article.url,
     publishedAt: article.publishedAt,
     summary: article.summary || article.excerpt,
-    contentSnippet: article.content.slice(0, 1800),
+    contentSnippet: article.content.slice(0, selectionContentChars),
   }));
   const { systemPrompt, userPrompt } = await loadPromptPair("select", {
     articles_json: JSON.stringify(compactArticles),
     max_articles: String(maxArticles),
   });
 
-  return callFridayJson({ systemPrompt, userPrompt, stage: "select" });
+  return callDeepSeekJson({ systemPrompt, userPrompt, stage: "select" });
 }
 
-async function callFridayForRewrite(selection, articles) {
+async function callDeepSeekForRewrite(selection, articles) {
   const selectionById = new Map(selection.articles.map((article) => [article.id, article]));
   const contentChars = positiveInteger(env.FRIDAY_REWRITE_CONTENT_CHARS, 12000);
   const maxAttempts = positiveInteger(env.FRIDAY_REWRITE_ATTEMPTS, 2);
@@ -528,7 +571,7 @@ async function callFridayForRewrite(selection, articles) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const rewrite = await callFridayForRewriteArticle(inputArticle, {
+        const rewrite = await callDeepSeekForRewriteArticle(inputArticle, {
           attempt,
           previousIssues: lastIssues.length ? lastIssues : lastError ? [lastError] : [],
         });
@@ -544,7 +587,7 @@ async function callFridayForRewrite(selection, articles) {
 
         lastIssues = issues;
         lastError = issues.join("; ");
-        await writeFridayModelLog("rewrite", {
+        await writeModelLog("rewrite", {
           event: "validation_failed",
           articleId: inputArticle.id,
           articleTitle: inputArticle.title,
@@ -588,7 +631,7 @@ function buildRewriteInputArticle(article, { contentChars, selection }) {
   };
 }
 
-async function callFridayForRewriteArticle(inputArticle, { attempt, previousIssues }) {
+async function callDeepSeekForRewriteArticle(inputArticle, { attempt, previousIssues }) {
   const { systemPrompt, userPrompt } = await loadPromptPair("rewrite", {
     selected_articles_json: JSON.stringify([inputArticle]),
   });
@@ -599,7 +642,7 @@ async function callFridayForRewriteArticle(inputArticle, { attempt, previousIssu
           .join("\n")}\n请只转写这 1 篇文章，并严格满足 bodyBlocks、annotations、pmTakeaways、image block 和中文忠实转写要求。`
       : "";
 
-  return callFridayJson({
+  return callDeepSeekJson({
     systemPrompt,
     userPrompt: `${userPrompt}${retryInstruction}`,
     stage: "rewrite",
@@ -612,13 +655,38 @@ async function callFridayForRewriteArticle(inputArticle, { attempt, previousIssu
   });
 }
 
-async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} }) {
+async function callDeepSeekJson({ systemPrompt, userPrompt, stage, logMeta = {} }) {
+  const maxAttempts = positiveInteger(env.DEEPSEEK_ATTEMPTS, 2);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await callDeepSeekJsonOnce({
+        systemPrompt,
+        userPrompt,
+        stage,
+        logMeta: { ...logMeta, apiAttempt: attempt },
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) break;
+      await delay(Math.min(2000 * attempt, 6000));
+    }
+  }
+
+  throw lastError ?? new Error(`DeepSeek ${stage} failed`);
+}
+
+async function callDeepSeekJsonOnce({ systemPrompt, userPrompt, stage, logMeta = {} }) {
   const startedAt = new Date().toISOString();
+  const thinkingType = env.DEEPSEEK_THINKING ?? "disabled";
+  const timeoutMs = positiveInteger(env.DEEPSEEK_TIMEOUT_MS, stage === "select" ? 120000 : 180000);
   const requestBody = {
-    model: env.FRIDAY_MODEL,
+    model: env.DEEPSEEK_MODEL ?? "deepseek-v4-pro",
     stream: false,
-    temperature: 0.2,
-    max_tokens: Number(env.FRIDAY_MAX_TOKENS ?? 12000),
+    max_tokens: Number(env.DEEPSEEK_MAX_TOKENS ?? env.FRIDAY_MAX_TOKENS ?? 12000),
+    response_format: { type: "json_object" },
+    thinking: { type: thinkingType },
     messages: [
       {
         role: "system",
@@ -627,19 +695,53 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
       { role: "user", content: userPrompt },
     ],
   };
-  const response = await fetch(env.FRIDAY_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: env.FRIDAY_APP_ID,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
+
+  if (thinkingType === "enabled") {
+    requestBody.reasoning_effort = env.DEEPSEEK_REASONING_EFFORT ?? "high";
+  } else {
+    requestBody.temperature = Number(env.DEEPSEEK_TEMPERATURE ?? 0.2);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+
+  try {
+    response = await fetch(env.DEEPSEEK_API_URL ?? "https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    const respondedAt = new Date().toISOString();
+    const message =
+      error instanceof Error && error.name === "AbortError"
+        ? `DeepSeek ${stage} timed out after ${timeoutMs}ms`
+        : `DeepSeek ${stage} request failed: ${normalizeError(error)}`;
+
+    await writeModelLog(stage, {
+      ...logMeta,
+      startedAt,
+      respondedAt,
+      ok: false,
+      model: requestBody.model,
+      timeoutMs,
+      error: message,
+    });
+    throw new Error(message);
+  } finally {
+    clearTimeout(timeout);
+  }
+
   const respondedAt = new Date().toISOString();
 
   if (!response.ok) {
     const responseText = await response.text();
-    await writeFridayModelLog(stage, {
+    await writeModelLog(stage, {
       ...logMeta,
       startedAt,
       respondedAt,
@@ -648,14 +750,14 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
       statusText: response.statusText,
       model: requestBody.model,
       rawApiResponse: responseText,
-      error: `Friday ${stage} HTTP ${response.status}`,
+      error: `DeepSeek ${stage} HTTP ${response.status}`,
     });
-    throw new Error(`Friday ${stage} HTTP ${response.status}: ${responseText}`);
+    throw new Error(`DeepSeek ${stage} HTTP ${response.status}: ${responseText}`);
   }
 
   const responseText = await response.text();
   if (!responseText.trim()) {
-    await writeFridayModelLog(stage, {
+    await writeModelLog(stage, {
       ...logMeta,
       startedAt,
       respondedAt,
@@ -664,16 +766,16 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
       statusText: response.statusText,
       model: requestBody.model,
       rawApiResponse: responseText,
-      error: `Friday ${stage} returned empty response body`,
+      error: `DeepSeek ${stage} returned empty response body`,
     });
-    throw new Error(`Friday ${stage} returned empty response body`);
+    throw new Error(`DeepSeek ${stage} returned empty response body`);
   }
 
   let payload;
   try {
     payload = JSON.parse(responseText);
   } catch (error) {
-    await writeFridayModelLog(stage, {
+    await writeModelLog(stage, {
       ...logMeta,
       startedAt,
       respondedAt,
@@ -682,16 +784,16 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
       statusText: response.statusText,
       model: requestBody.model,
       rawApiResponse: responseText,
-      error: `Friday ${stage} response is not JSON: ${normalizeError(error)}`,
+      error: `DeepSeek ${stage} response is not JSON: ${normalizeError(error)}`,
     });
     throw new Error(
-      `Friday ${stage} response is not JSON: ${normalizeError(error)}; preview=${responseText.slice(0, 240)}`,
+      `DeepSeek ${stage} response is not JSON: ${normalizeError(error)}; preview=${responseText.slice(0, 240)}`,
     );
   }
 
   const content = payload.choices?.[0]?.message?.content;
   if (!content) {
-    await writeFridayModelLog(stage, {
+    await writeModelLog(stage, {
       ...logMeta,
       startedAt,
       respondedAt,
@@ -701,16 +803,16 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
       model: requestBody.model,
       rawApiResponse: responseText,
       apiPayload: payload,
-      error: `Friday ${stage} response missing choices[0].message.content`,
+      error: `DeepSeek ${stage} response missing choices[0].message.content`,
     });
-    throw new Error(`Friday ${stage} response missing choices[0].message.content`);
+    throw new Error(`DeepSeek ${stage} response missing choices[0].message.content`);
   }
 
   let parsed;
   try {
     parsed = parseJsonFromModel(content);
   } catch (error) {
-    await writeFridayModelLog(stage, {
+    await writeModelLog(stage, {
       ...logMeta,
       startedAt,
       respondedAt,
@@ -726,7 +828,7 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
     throw error;
   }
 
-  await writeFridayModelLog(stage, {
+  await writeModelLog(stage, {
     ...logMeta,
     startedAt,
     respondedAt,
@@ -745,12 +847,12 @@ async function callFridayJson({ systemPrompt, userPrompt, stage, logMeta = {} })
 async function loadPromptPair(stage, variables) {
   const systemPromptPath =
     stage === "select"
-      ? path.resolve(env.FRIDAY_SELECT_SYSTEM_PROMPT_PATH ?? defaultSelectSystemPromptPath)
-      : path.resolve(env.FRIDAY_REWRITE_SYSTEM_PROMPT_PATH ?? defaultRewriteSystemPromptPath);
+      ? path.resolve(env.LLM_SELECT_SYSTEM_PROMPT_PATH ?? env.FRIDAY_SELECT_SYSTEM_PROMPT_PATH ?? defaultSelectSystemPromptPath)
+      : path.resolve(env.LLM_REWRITE_SYSTEM_PROMPT_PATH ?? env.FRIDAY_REWRITE_SYSTEM_PROMPT_PATH ?? defaultRewriteSystemPromptPath);
   const userPromptPath =
     stage === "select"
-      ? path.resolve(env.FRIDAY_SELECT_USER_PROMPT_PATH ?? defaultSelectUserPromptPath)
-      : path.resolve(env.FRIDAY_REWRITE_USER_PROMPT_PATH ?? defaultRewriteUserPromptPath);
+      ? path.resolve(env.LLM_SELECT_USER_PROMPT_PATH ?? env.FRIDAY_SELECT_USER_PROMPT_PATH ?? defaultSelectUserPromptPath)
+      : path.resolve(env.LLM_REWRITE_USER_PROMPT_PATH ?? env.FRIDAY_REWRITE_USER_PROMPT_PATH ?? defaultRewriteUserPromptPath);
   const [systemPrompt, userTemplate] = await Promise.all([
     fs.readFile(systemPromptPath, "utf8"),
     fs.readFile(userPromptPath, "utf8"),
@@ -909,7 +1011,15 @@ function validateRewrittenArticle(article, inputArticle) {
   const images = blocks.filter((block) => block?.type === "image");
   const paragraphText = paragraphs.map((block) => block.content).join("");
   const paragraphChineseChars = countChineseChars(paragraphText);
-  const minChineseChars = positiveInteger(env.FRIDAY_REWRITE_MIN_CHINESE_CHARS, 800);
+  const configuredMinChineseChars = positiveInteger(env.FRIDAY_REWRITE_MIN_CHINESE_CHARS, 800);
+  const sourceContentLength = normalizeText(inputArticle.content).length;
+  const minChineseChars =
+    sourceContentLength < 1200
+      ? Math.min(configuredMinChineseChars, 450)
+      : sourceContentLength < 4500
+        ? Math.min(configuredMinChineseChars, 500)
+        : configuredMinChineseChars;
+  const minAnnotations = sourceContentLength < 1200 ? 1 : sourceContentLength < 4500 ? 2 : 3;
   const sourceImageIds = new Set((inputArticle.sourceImages ?? []).map((image) => image.id));
 
   if (blocks.length < 8) issues.push(`bodyBlocks 数量不足：${blocks.length}/8`);
@@ -923,7 +1033,7 @@ function validateRewrittenArticle(article, inputArticle) {
 
   const annotations = Array.isArray(article.annotations) ? article.annotations : [];
   const pmTakeaways = Array.isArray(article.pmTakeaways) ? article.pmTakeaways : [];
-  if (annotations.length < 3) issues.push(`annotations 数量不足：${annotations.length}/3`);
+  if (annotations.length < minAnnotations) issues.push(`annotations 数量不足：${annotations.length}/${minAnnotations}`);
   if (pmTakeaways.length < 3) issues.push(`pmTakeaways 数量不足：${pmTakeaways.length}/3`);
   for (const image of images) {
     if (!image.imageId || !sourceImageIds.has(String(image.imageId))) {
@@ -1025,16 +1135,16 @@ function normalizeFridayRadar(generated, fetched, sourceArticles, { rewriteFailu
   const messageParts = [];
   messageParts.push(fetched.errors.length ? "RSS 部分源失败" : "RSS 抓取完成");
   if (fridayStatus === "ok") {
-    messageParts.push("Friday 筛选与逐篇中文转写已完成");
+    messageParts.push("DeepSeek 筛选与逐篇中文转写已完成");
   } else if (fridayStatus === "partial") {
-    messageParts.push(`Friday 逐篇中文转写部分成功，${rewriteFailures.length} 篇未通过校验`);
+    messageParts.push(`DeepSeek 逐篇中文转写部分成功，${rewriteFailures.length} 篇未通过校验`);
   } else {
-    messageParts.push("Friday 逐篇中文转写未产出通过校验的文章");
+    messageParts.push("DeepSeek 逐篇中文转写未产出通过校验的文章");
   }
 
   return {
     version: 1,
-    mode: "friday",
+    mode: "deepseek",
     generatedAt: new Date().toISOString(),
     status: {
       fetch: fetched.errors.length ? "partial" : "ok",
@@ -1068,7 +1178,7 @@ function buildFallbackRadar(fetched, { mode, fridayStatus, fridayError }) {
       score: 48 + sourceNames.length * 10,
       sourceCount: sourceNames.length,
       category: group.category,
-      whyHot: `这个话题来自 ${sourceNames.slice(0, 3).join("、")} 等 ${sourceNames.length} 个来源。当前只完成 RSS/正文抽取，尚未经过 Friday 中文转写。`,
+      whyHot: `这个话题来自 ${sourceNames.slice(0, 3).join("、")} 等 ${sourceNames.length} 个来源。当前只完成 RSS/正文抽取，尚未经过 DeepSeek 中文转写。`,
       pmAngle: "这是一条真实抓取到的候选趋势，但还需要模型进一步判断 PM 价值、稀缺性和多源共振强度。",
       signals: [
         {
@@ -1082,7 +1192,7 @@ function buildFallbackRadar(fetched, { mode, fridayStatus, fridayError }) {
         time: index === 0 ? "Today" : `D-${index}`,
         event: `${article.sourceName}：${article.title}`,
       })),
-      disagreements: ["未运行 Friday 时，系统不会自动提炼观点分歧。"],
+      disagreements: ["未运行模型生成时，系统不会自动提炼观点分歧。"],
       readingOrder: group.articles.slice(0, 3).map((article) => `阅读 ${article.sourceName} 的《${article.title}》。`),
       articleIds: group.articles.slice(0, 3).map((article) => article.id),
     };
@@ -1115,15 +1225,15 @@ function buildFallbackRadar(fetched, { mode, fridayStatus, fridayError }) {
       readingTime: Math.max(2, Math.ceil((article.content?.length ?? 600) / 650)),
       tags: [article.sourceCategory],
       title: article.title,
-      oneSentence: article.excerpt || article.summary || "这篇文章已从 RSS 抓取到，但尚未经过 Friday 重新解读。",
-      whyRecommended: "真实 RSS 候选文章，等待 Friday 按 PM 偏好评分和改写。",
+      oneSentence: article.excerpt || article.summary || "这篇文章已从 RSS 抓取到，但尚未经过 DeepSeek 中文转写。",
+      whyRecommended: "真实 RSS 候选文章，等待 DeepSeek 按 PM 偏好评分和转写。",
       whyNow: "当前页面展示的是抓取与正文抽取结果，不是最终模型推荐。",
       pmAngle: "需要进一步判断这篇文章对产品、平台、用户或行业演化的意义。",
       bodyBlocks: [
         {
           type: "paragraph",
           content:
-            "这篇文章来自真实 RSS 抓取。由于 Friday 本次未成功生成，下面先展示正文抽取片段，便于确认数据链路已经跑通。",
+            "这篇文章来自真实 RSS 抓取。由于 DeepSeek 本次未成功生成，下面先展示正文抽取片段，便于确认数据链路已经跑通。",
         },
         ...imageBlocks,
         ...paragraphs.map((content) => ({ type: "paragraph", content })),
@@ -1131,7 +1241,7 @@ function buildFallbackRadar(fetched, { mode, fridayStatus, fridayError }) {
       annotations: [],
       pmTakeaways: [
         "RSS 与正文抽取已经完成。",
-        "需要 Friday 成功返回后，才会生成完整中文转写、注释和 PM 启发。",
+        "需要 DeepSeek 成功返回后，才会生成完整中文转写、注释和 PM 启发。",
       ],
       relatedIds: [],
       images: article.images ?? [],
@@ -1146,7 +1256,7 @@ function buildFallbackRadar(fetched, { mode, fridayStatus, fridayError }) {
     status: {
       fetch: fetched.errors.length ? "partial" : "ok",
       friday: fridayStatus,
-      message: fridayStatus === "ok" ? "已生成" : "已抓取 RSS，但未完成 Friday 中文转写。",
+      message: fridayStatus === "ok" ? "已生成" : "已抓取 RSS，但未完成 DeepSeek 中文转写。",
       fridayError,
     },
     topics,
@@ -1325,14 +1435,14 @@ function parseJsonFromModel(content) {
   const start = withoutFence.indexOf("{");
   const end = withoutFence.lastIndexOf("}");
   if (start === -1 || end === -1) {
-    throw new Error("Friday output is not JSON");
+    throw new Error("Model output is not JSON");
   }
   const jsonText = withoutFence.slice(start, end + 1);
   try {
     return JSON.parse(jsonText);
   } catch (error) {
     throw new Error(
-      `Friday output JSON parse failed: ${normalizeError(error)}; preview=${jsonText.slice(0, 320)}`,
+      `Model output JSON parse failed: ${normalizeError(error)}; preview=${jsonText.slice(0, 320)}`,
     );
   }
 }
@@ -1420,6 +1530,179 @@ function normalizeError(error) {
   return String(error);
 }
 
+async function readFetchedDataset() {
+  const fetched = await readLatestFetchedFromSupabase();
+  if (fetched) return fetched;
+  return readJson(fetchedPath);
+}
+
+async function readLatestFetchedFromSupabase() {
+  const supabase = createSupabaseClientFromEnv();
+  if (!supabase) return null;
+
+  try {
+    const { data: run, error: runError } = await supabase
+      .from("trendlens_radar_runs")
+      .select("id,generated_at,sources_snapshot,fetch_errors")
+      .order("generated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (runError) throw runError;
+    if (!run) return null;
+
+    const { data: rows, error: rowsError } = await supabase
+      .from("trendlens_fetched_articles")
+      .select("raw")
+      .eq("run_id", run.id);
+
+    if (rowsError) throw rowsError;
+    const articles = (rows ?? []).map((row) => row.raw).filter(Boolean);
+    if (articles.length === 0) return null;
+
+    return {
+      version: 1,
+      fetchedAt: run.generated_at,
+      itemLimit,
+      sources: Array.isArray(run.sources_snapshot) ? run.sources_snapshot : [],
+      articles,
+      errors: Array.isArray(run.fetch_errors) ? run.fetch_errors : [],
+    };
+  } catch (error) {
+    console.warn(`Failed to read fetched articles from Supabase: ${normalizeError(error)}`);
+    return null;
+  }
+}
+
+async function persistPipelineResult({ fetched, radar }) {
+  const supabase = createSupabaseClientFromEnv();
+  if (!supabase) {
+    return { provider: "file", status: "skipped", reason: "Supabase env not configured" };
+  }
+
+  try {
+    await ensureSupabaseSourcesSeeded(supabase);
+
+    const { data: run, error: runError } = await supabase
+      .from("trendlens_radar_runs")
+      .insert({
+        version: radar.version ?? 1,
+        mode: radar.mode,
+        generated_at: radar.generatedAt,
+        status: radar.status,
+        topics: radar.topics ?? [],
+        sources_snapshot: radar.sources ?? [],
+        fetch_errors: radar.fetchErrors ?? [],
+        rewrite_failures: radar.rewriteFailures ?? [],
+        article_count: radar.articles?.length ?? 0,
+      })
+      .select("id")
+      .single();
+
+    if (runError) throw runError;
+
+    await insertInBatches(
+      supabase,
+      "trendlens_articles",
+      (radar.articles ?? []).map((article) => ({
+        run_id: run.id,
+        id: article.id,
+        topic_id: article.topicId,
+        source: article.source,
+        source_type: article.sourceType,
+        published_at: article.publishedAt,
+        original_url: article.originalUrl,
+        category: article.category,
+        heat: article.heat,
+        reading_time: article.readingTime,
+        tags: article.tags ?? [],
+        title: article.title,
+        one_sentence: article.oneSentence,
+        why_recommended: article.whyRecommended,
+        why_now: article.whyNow,
+        pm_angle: article.pmAngle,
+        body_blocks: article.bodyBlocks ?? [],
+        annotations: article.annotations ?? [],
+        pm_takeaways: article.pmTakeaways ?? [],
+        related_ids: article.relatedIds ?? [],
+        images: article.images ?? [],
+        hero_image: article.heroImage ?? null,
+        raw: article,
+      })),
+    );
+
+    await insertInBatches(
+      supabase,
+      "trendlens_fetched_articles",
+      (fetched.articles ?? []).map((article) => ({
+        run_id: run.id,
+        id: article.id,
+        source_id: article.sourceId,
+        source_name: article.sourceName,
+        title: article.title,
+        url: article.url,
+        published_at: article.publishedAt,
+        parse_status: article.parseStatus,
+        image_count: Array.isArray(article.images) ? article.images.length : 0,
+        raw: article,
+      })),
+    );
+
+    return { provider: "supabase", status: "ok", runId: run.id };
+  } catch (error) {
+    console.warn(`Failed to persist TrendLens data to Supabase: ${normalizeError(error)}`);
+    return { provider: "supabase", status: "failed", error: normalizeError(error) };
+  }
+}
+
+async function insertInBatches(supabase, tableName, rows, batchSize = 100) {
+  if (!rows.length) return;
+  for (let index = 0; index < rows.length; index += batchSize) {
+    const batch = rows.slice(index, index + batchSize);
+    const { error } = await supabase.from(tableName).insert(batch);
+    if (error) throw error;
+  }
+}
+
+async function ensureSupabaseSourcesSeeded(supabase) {
+  const { data, error } = await supabase.from("trendlens_sources").select("id").limit(1);
+  if (error) throw error;
+  if (Array.isArray(data) && data.length > 0) return;
+
+  const sources = await loadSourceConfigsFromYaml();
+  const rows = sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    url: source.url,
+    category: source.category,
+    language: source.language ?? "en",
+    weight: source.weight ?? 1,
+    enabled: source.enabled !== false,
+    fetch_interval: source.fetch_interval ?? null,
+    raw: source,
+  }));
+
+  if (!rows.length) return;
+
+  const { error: upsertError } = await supabase.from("trendlens_sources").upsert(rows, {
+    onConflict: "id",
+  });
+  if (upsertError) throw upsertError;
+}
+
+function createSupabaseClientFromEnv() {
+  const url = env.SUPABASE_URL ?? env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = env.SUPABASE_SECRET_KEY ?? env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+
+  return createClient(url, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+}
+
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
@@ -1428,7 +1711,7 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function writeFridayModelLog(stage, entry) {
+async function writeModelLog(stage, entry) {
   if (stage !== "rewrite") return;
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1436,7 +1719,7 @@ async function writeFridayModelLog(stage, entry) {
     .filter(Boolean)
     .map((part) => safeFilePart(part))
     .join("-");
-  const filePath = path.join(logsDir, `friday-rewrite-${suffix}-${crypto.randomUUID().slice(0, 8)}.json`);
+  const filePath = path.join(logsDir, `deepseek-rewrite-${suffix}-${crypto.randomUUID().slice(0, 8)}.json`);
   const body = {
     version: 1,
     stage,
@@ -1447,7 +1730,7 @@ async function writeFridayModelLog(stage, entry) {
   try {
     await writeJson(filePath, body);
   } catch (error) {
-    console.warn(`Failed to write Friday ${stage} log: ${normalizeError(error)}`);
+    console.warn(`Failed to write model ${stage} log: ${normalizeError(error)}`);
   }
 }
 
@@ -1455,7 +1738,7 @@ function safeFilePart(value) {
   return String(value).replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, "-").slice(0, 80);
 }
 
-function printSummary(label, radar) {
+function printSummary(label, radar, storage = { provider: "file", status: "skipped" }) {
   console.log(
     JSON.stringify(
       {
@@ -1468,6 +1751,7 @@ function printSummary(label, radar) {
         fridayStatus: radar.status.friday,
         fridayError: radar.status.fridayError,
         rewriteFailures: radar.rewriteFailures?.length ?? 0,
+        storage,
         output: path.relative(cwd, radarPath),
       },
       null,

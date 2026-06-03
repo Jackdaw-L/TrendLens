@@ -9,16 +9,23 @@ const compat = new FlatCompat({
   baseDirectory: __dirname,
 });
 
+const generatedFileIgnores = {
+  ignores: [
+    "node_modules/**",
+    ".next/**",
+    ".netlify/**",
+    "out/**",
+    "build/**",
+    "data/logs/**",
+    "next-env.d.ts",
+  ],
+};
+
 const eslintConfig = [
+  generatedFileIgnores,
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
-    ignores: [
-      "node_modules/**",
-      ".next/**",
-      "out/**",
-      "build/**",
-      "next-env.d.ts",
-    ],
+    ...generatedFileIgnores,
   },
 ];
 

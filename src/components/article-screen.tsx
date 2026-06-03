@@ -1,7 +1,5 @@
 "use client";
 
-/* eslint-disable @next/next/no-img-element */
-
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
@@ -17,6 +15,7 @@ import {
   BookmarkButton,
   HeaderBar,
 } from "@/components/app-chrome";
+import { LazyImage } from "@/components/lazy-image";
 import { useReadingState } from "@/components/use-reading-state";
 import type { Annotation, Article, ArticleImage } from "@/lib/radar-data";
 
@@ -77,7 +76,7 @@ export function ArticleScreen({
       footer={
         <div className="article-toolbar" aria-label="阅读工具">
           <button
-            className="toolbar-button"
+            className={`toolbar-button ${reading.isFavorite(article.id) ? "is-active" : ""}`}
             onClick={() => reading.toggleFavorite(article.id)}
             type="button"
           >
@@ -110,7 +109,7 @@ export function ArticleScreen({
 
       <article className="article-detail">
         <div className="article-hero-media" aria-hidden={!heroImage}>
-          {heroImage && <img alt={heroImage.alt || article.title} src={heroImage.url} />}
+          {heroImage && <LazyImage alt={heroImage.alt || article.title} priority src={heroImage.url} />}
         </div>
 
         <h1>{article.title}</h1>
@@ -140,7 +139,7 @@ export function ArticleScreen({
               return (
                 <figure className="article-image-block" key={`${block.type}-${index}`}>
                   <div className="article-image-block__media">
-                    <img alt={block.alt || block.caption || article.title} src={block.url} />
+                    <LazyImage alt={block.alt || block.caption || article.title} src={block.url} />
                   </div>
                   {block.caption && <figcaption>{block.caption}</figcaption>}
                 </figure>
@@ -172,7 +171,7 @@ export function ArticleScreen({
             <h2>延伸阅读</h2>
             <div className="related-list">
               {related.map((item) => (
-                <Link className="related-link" href={`/articles/${item.id}`} key={item.id}>
+                <Link className="related-link" href={`/articles/${item.id}`} key={item.id} prefetch>
                   <span>{item.source}</span>
                   <strong>{item.title}</strong>
                 </Link>

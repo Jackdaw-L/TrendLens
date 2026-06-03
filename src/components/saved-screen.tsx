@@ -21,7 +21,7 @@ export function SavedScreen({ articles, topics }: { articles: Article[]; topics:
 
       <section className="saved-grid" aria-label="收藏文章">
         {saved.map((article) => (
-          <Link className="saved-card" href={`/articles/${article.id}`} key={article.id}>
+          <Link className="saved-card" href={`/articles/${article.id}`} key={article.id} prefetch>
             <div className="saved-card__meta">
               <span className="source-chip">{article.source}</span>
               <HeatScore value={getArticleHeatScore(article, topics)} />

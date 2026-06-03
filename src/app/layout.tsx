@@ -15,8 +15,8 @@ export const metadata: Metadata = {
     telephone: false,
   },
   icons: {
-    icon: "/trendlens-icon.svg",
-    apple: "/trendlens-icon.svg",
+    icon: "/trendlens-icon.png",
+    apple: "/trendlens-icon.png",
   },
   manifest: "/manifest.webmanifest",
 };

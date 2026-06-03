@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Lightbulb, Clock3, ArrowRight } from "lucide-react";
 import {
   AppShell,
@@ -15,18 +17,56 @@ import { getArticleHeatScore, type Article } from "@/lib/radar-data";
 import type { RadarDataset } from "@/lib/radar-store";
 
 export function HomeScreen({ dataset }: { dataset: RadarDataset }) {
+  const router = useRouter();
   const reading = useReadingState();
-  const articles = dataset.articles;
-  const updatedAt = formatDateTime(dataset.generatedAt);
+  const [currentDataset, setCurrentDataset] = useState(dataset);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const articles = currentDataset.articles;
+  const updatedAt = formatDateTime(currentDataset.generatedAt);
+
+  useEffect(() => {
+    setCurrentDataset(dataset);
+  }, [dataset]);
+
+  useEffect(() => {
+    router.prefetch("/saved");
+    router.prefetch("/settings");
+    currentDataset.articles.forEach((article) => {
+      router.prefetch(`/articles/${article.id}`);
+    });
+  }, [currentDataset.articles, router]);
+
+  async function refreshList() {
+    setRefreshing(true);
+    setRefreshError(false);
+
+    try {
+      const response = await fetch(`/api/radar?refresh=${Date.now()}`, {
+        cache: "no-store",
+        headers: {
+          accept: "application/json",
+        },
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const nextDataset = (await response.json()) as RadarDataset;
+      setCurrentDataset(nextDataset);
+      reading.markRefresh();
+    } catch {
+      setRefreshError(true);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   return (
     <AppShell>
-      <TopAppBar action={<RefreshButton onClick={reading.markRefresh} />} />
+      <TopAppBar action={<RefreshButton busy={refreshing} onClick={refreshList} />} />
 
       <section className="dashboard-header" aria-label="今日推荐状态">
         <p className="sync-line">
           <span className="status-dot" aria-hidden />
-          {dataStatusText(dataset, updatedAt)}
+          {refreshError ? "刷新失败，请稍后再试" : dataStatusText(currentDataset, updatedAt)}
         </p>
         <h1>
           今日推荐
@@ -38,7 +78,7 @@ export function HomeScreen({ dataset }: { dataset: RadarDataset }) {
         {articles.map((article) => (
           <ArticleCard
             article={article}
-            heatScore={getArticleHeatScore(article, dataset.topics)}
+            heatScore={getArticleHeatScore(article, currentDataset.topics)}
             isFavorite={reading.isFavorite(article.id)}
             isRead={reading.isRead(article.id)}
             key={article.id}
@@ -85,7 +125,7 @@ function ArticleCard({
         <BookmarkButton active={isFavorite} onClick={onToggleFavorite} />
       </header>
 
-      <Link className="article-card__main" href={`/articles/${article.id}`}>
+      <Link className="article-card__main" href={`/articles/${article.id}`} prefetch>
         <h2>{article.title}</h2>
         <p className="article-card__sentence">{article.oneSentence}</p>
 
@@ -110,7 +150,7 @@ function ArticleCard({
 }
 
 function dataStatusText(dataset: RadarDataset, updatedAt: string) {
-  if (dataset.mode === "friday") {
+  if (dataset.mode === "deepseek" || dataset.mode === "friday") {
     if (dataset.status.friday === "partial") {
       return `${updatedAt} 已同步，部分文章转写失败`;
     }
@@ -123,7 +163,7 @@ function dataStatusText(dataset: RadarDataset, updatedAt: string) {
   }
 
   if (dataset.mode === "fetched") {
-    return `${updatedAt} 已抓取 RSS，待 Friday 生成`;
+    return `${updatedAt} 已抓取 RSS，待模型生成`;
   }
 
   return "当前为演示数据";

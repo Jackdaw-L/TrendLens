@@ -1,9 +1,9 @@
 import { HomeScreen } from "@/components/home-screen";
-import { loadRadarDataset } from "@/lib/radar-store";
+import { loadRadarListDataset } from "@/lib/radar-store";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 180;
 
 export default async function Home() {
-  const dataset = await loadRadarDataset();
+  const dataset = await loadRadarListDataset();
   return <HomeScreen dataset={dataset} />;
 }

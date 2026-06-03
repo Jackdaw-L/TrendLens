@@ -1,9 +1,14 @@
 import { notFound } from "next/navigation";
 import { ArticleScreen } from "@/components/article-screen";
 import type { Article } from "@/lib/radar-data";
-import { getRuntimeArticle } from "@/lib/radar-store";
+import { getRuntimeArticle, loadRadarListDataset } from "@/lib/radar-store";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 180;
+
+export async function generateStaticParams() {
+  const dataset = await loadRadarListDataset();
+  return dataset.articles.map((article) => ({ id: article.id }));
+}
 
 export default async function ArticlePage({
   params,

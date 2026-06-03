@@ -9,9 +9,9 @@
   "orientation": "portrait",
   "icons": [
     {
-      "src": "/trendlens-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/trendlens-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ],
