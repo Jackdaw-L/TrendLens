@@ -58,13 +58,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
-          cache: npm
 
-      - name: Use stable npm
-        run: npm install -g npm@10.9.2
+      - name: Set up pnpm
+        run: npm install -g pnpm@10.18.0
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --prod --no-frozen-lockfile --ignore-scripts
 
       - name: Run RSS, selection, rewrite, and Supabase persistence
         run: npm run pipeline
