@@ -459,12 +459,24 @@ svg {
   transition:
     transform 180ms ease,
     opacity 180ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.article-card:hover,
-.saved-card:hover,
-.related-link:hover {
-  transform: translateY(-2px);
+/* 卡片内可点击的链接区域：同样关闭 iOS 的灰色点击高亮，避免点击时出现矩形阴影。 */
+.article-card__main,
+.saved-card a,
+.related-link {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* hover 效果只在有真实指针（桌面端）时启用，避免触摸端点击后 hover 状态粘滞，
+   导致从详情页返回时卡片阴影残留一段时间才消失。 */
+@media (hover: hover) {
+  .article-card:hover,
+  .saved-card:hover,
+  .related-link:hover {
+    transform: translateY(-2px);
+  }
 }
 
 .article-card.is-read {
