@@ -14,10 +14,10 @@ const logsDir = path.join(dataDir, "logs");
 const promptDir = path.join(cwd, "prompts");
 const fetchedPath = path.join(dataDir, "fetched-articles.json");
 const radarPath = path.join(dataDir, "radar.json");
-const defaultSelectSystemPromptPath = path.join(promptDir, "friday-select-system.md");
-const defaultSelectUserPromptPath = path.join(promptDir, "friday-select-user.md");
-const defaultRewriteSystemPromptPath = path.join(promptDir, "friday-rewrite-system.md");
-const defaultRewriteUserPromptPath = path.join(promptDir, "friday-rewrite-user.md");
+const defaultSelectSystemPromptPath = path.join(promptDir, "select-system.md");
+const defaultSelectUserPromptPath = path.join(promptDir, "select-user.md");
+const defaultRewriteSystemPromptPath = path.join(promptDir, "rewrite-system.md");
+const defaultRewriteUserPromptPath = path.join(promptDir, "rewrite-user.md");
 const parser = new Parser({
   customFields: {
     item: [
@@ -46,6 +46,9 @@ const modelCandidateArticles = Number(
     env.FRIDAY_CANDIDATE_ARTICLES ??
     Math.max(modelMaxArticles * 3, modelMaxArticles),
 );
+// 跨 run 去重：剔除最近 N 天内已经推荐过的文章，避免连续两天推荐重复内容。
+// 设为 0 可关闭去重。
+const dedupLookbackDays = Number(cli["dedup-days"] ?? env.DEDUP_LOOKBACK_DAYS ?? 3);
 
 await fs.mkdir(dataDir, { recursive: true });
 await fs.mkdir(logsDir, { recursive: true });
@@ -495,10 +498,15 @@ function imageIdentity(value) {
 
 async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles }) {
   const minContentChars = positiveInteger(env.FRIDAY_MIN_CONTENT_CHARS, 600);
-  const usable = fetched.articles
+  const qualified = fetched.articles
     .filter((article) => article.title && normalizeText(article.content).length >= minContentChars)
-    .sort((a, b) => (b.sourceWeight ?? 1) - (a.sourceWeight ?? 1))
-    .slice(0, modelCandidateArticles);
+    .sort((a, b) => (b.sourceWeight ?? 1) - (a.sourceWeight ?? 1));
+
+  // 在交给 DeepSeek 选文之前，先剔除最近 N 天已推荐过的文章，避免跨天重复推荐。
+  const freshCandidates = await excludeRecentlyRecommended(qualified, {
+    maxArticles: modelMaxArticles,
+  });
+  const usable = freshCandidates.slice(0, modelCandidateArticles);
 
   if (usable.length === 0) {
     return buildFallbackRadar(fetched, {
@@ -531,6 +539,52 @@ async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles
       fridayStatus: "failed",
       fridayError: normalizeError(error),
     });
+  }
+}
+
+// 从候选文章中剔除最近 dedupLookbackDays 天内已推荐过的文章。
+// 兜底策略：如果剔重后新鲜候选不足以选出目标数量，则保留原候选，
+// 防止出现「推荐列表过少甚至为空」的极端情况。
+async function excludeRecentlyRecommended(candidates, { maxArticles }) {
+  if (dedupLookbackDays <= 0 || candidates.length === 0) return candidates;
+
+  const recommendedIds = await loadRecentlyRecommendedIds(dedupLookbackDays);
+  if (recommendedIds.size === 0) return candidates;
+
+  const deduped = candidates.filter((article) => !recommendedIds.has(article.id));
+  const removed = candidates.length - deduped.length;
+
+  if (deduped.length < maxArticles) {
+    console.warn(
+      `[dedup] 剔重后仅剩 ${deduped.length} 篇新鲜候选（目标 ${maxArticles} 篇），为避免推荐过少，本次保留全部 ${candidates.length} 篇候选。`,
+    );
+    return candidates;
+  }
+
+  if (removed > 0) {
+    console.log(`[dedup] 已剔除最近 ${dedupLookbackDays} 天内推荐过的 ${removed} 篇文章。`);
+  }
+  return deduped;
+}
+
+// 读取最近 days 天内 Supabase 中已落库（已推荐）的文章 id 集合。
+// 文章 id 由文章网址哈希得到（stableId），跨 run 稳定，因此可直接按 id 比对。
+async function loadRecentlyRecommendedIds(days) {
+  const supabase = createSupabaseClientFromEnv();
+  if (!supabase) return new Set();
+
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from("trendlens_articles")
+      .select("id, created_at")
+      .gte("created_at", cutoff);
+    if (error) throw error;
+    return new Set((data ?? []).map((row) => String(row.id)));
+  } catch (error) {
+    // 去重属于「锦上添花」，读取失败时不应阻断主流程，退化为不去重。
+    console.warn(`[dedup] 读取历史推荐文章失败，本次跳过去重：${normalizeError(error)}`);
+    return new Set();
   }
 }
 
@@ -1664,13 +1718,24 @@ async function insertInBatches(supabase, tableName, rows, batchSize = 100) {
   }
 }
 
+// 把 sources.yaml 和 Supabase 的 trendlens_sources 表对齐：增量插入缺失的信源。
+// 设计原则：
+// - 已存在的信源完全不动（不会覆盖用户在前端手动停用/启用的状态）。
+// - 只把 yaml 中存在、但 Supabase 中缺失的信源补充进去。
+// - 这样既能让首次部署时自动 seed，也能在后续向 yaml 新增信源后自动同步到线上。
 async function ensureSupabaseSourcesSeeded(supabase) {
-  const { data, error } = await supabase.from("trendlens_sources").select("id").limit(1);
-  if (error) throw error;
-  if (Array.isArray(data) && data.length > 0) return;
-
   const sources = await loadSourceConfigsFromYaml();
-  const rows = sources.map((source) => ({
+  if (!sources.length) return;
+
+  const { data: existingRows, error } = await supabase.from("trendlens_sources").select("id");
+  if (error) throw error;
+
+  const existingIds = new Set((existingRows ?? []).map((row) => String(row.id)));
+  const missingSources = sources.filter((source) => !existingIds.has(String(source.id)));
+
+  if (!missingSources.length) return;
+
+  const rows = missingSources.map((source) => ({
     id: source.id,
     name: source.name,
     url: source.url,
@@ -1682,12 +1747,12 @@ async function ensureSupabaseSourcesSeeded(supabase) {
     raw: source,
   }));
 
-  if (!rows.length) return;
+  const { error: insertError } = await supabase.from("trendlens_sources").insert(rows);
+  if (insertError) throw insertError;
 
-  const { error: upsertError } = await supabase.from("trendlens_sources").upsert(rows, {
-    onConflict: "id",
-  });
-  if (upsertError) throw upsertError;
+  console.log(
+    `[sources] 已向 Supabase 同步 ${rows.length} 个新信源：${rows.map((r) => r.id).join(", ")}`,
+  );
 }
 
 function createSupabaseClientFromEnv() {

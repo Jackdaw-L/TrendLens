@@ -58,8 +58,8 @@ scripts/
   pipeline.mjs             RSS 抓取、DeepSeek 处理、Supabase 写入
 
 prompts/
-  friday-select-*.md       选文 prompt
-  friday-rewrite-*.md      中文转写 prompt
+  select-*.md              选文 prompt
+  rewrite-*.md             中文转写 prompt
 
 supabase/
   schema.sql               当前数据表结构
@@ -101,8 +101,8 @@ SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
 
 LLM prompt 独立放在 `prompts/`，方便不改代码直接调：
 
-- `friday-select-system.md` / `friday-select-user.md`：决定哪些文章值得推荐。
-- `friday-rewrite-system.md` / `friday-rewrite-user.md`：决定中文转写、术语注释、图片插入和 PM Takeaways 的输出结构。
+- `select-system.md` / `select-user.md`：决定哪些文章值得推荐。
+- `rewrite-system.md` / `rewrite-user.md`：决定中文转写、术语注释、图片插入和 PM Takeaways 的输出结构。
 
 模型原始返回日志会写到 `data/logs/deepseek-rewrite-*.json`，该目录不会提交到 Git。
 
@@ -110,6 +110,7 @@ LLM prompt 独立放在 `prompts/`，方便不改代码直接调：
 
 - 想改页面样式：先看 `src/app/globals.css`，再看对应 `src/components/*-screen.tsx`。
 - 想改文章详情体验：看 `src/components/article-screen.tsx`。
-- 想改推荐策略：优先改 `prompts/friday-select-*.md`。
-- 想改转写结构：优先改 `prompts/friday-rewrite-*.md` 和 `scripts/pipeline.mjs` 的校验逻辑。
+- 想改推荐策略：优先改 `prompts/select-*.md`。
+- 想改转写结构：优先改 `prompts/rewrite-*.md` 和 `scripts/pipeline.mjs` 的校验逻辑。
+- 想调跨天去重：改环境变量 `DEDUP_LOOKBACK_DAYS`（默认 3 天，设为 0 关闭），逻辑在 `scripts/pipeline.mjs` 的 `excludeRecentlyRecommended`。
 - 想改信息源管理：看 `src/lib/source-store.ts` 和 `src/app/api/sources/route.ts`。

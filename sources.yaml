@@ -71,3 +71,60 @@ sources:
     weight: 1
     enabled: true
     fetch_interval: daily
+  # 以下为 Karpathy 推荐的 HN 热门个人博客（来源：https://gist.github.com/emschwartz/e6d2bf860ccc367fe37ff953ba6de66b）
+  - id: sean-goedecke
+    name: Sean Goedecke
+    url: https://www.seangoedecke.com/rss.xml
+    category: analysis
+    language: en
+    weight: 1.1
+    enabled: true
+    fetch_interval: daily
+  - id: geoffrey-litt
+    name: Geoffrey Litt
+    url: https://www.geoffreylitt.com/feed.xml
+    category: analysis
+    language: en
+    weight: 1.1
+    enabled: true
+    fetch_interval: daily
+  - id: minimaxir
+    name: minimaxir
+    url: https://minimaxir.com/index.xml
+    category: analysis
+    language: en
+    weight: 1.1
+    enabled: true
+    fetch_interval: daily
+  - id: wheresyoured-at
+    name: Where's Your Ed At
+    url: https://www.wheresyoured.at/rss/
+    category: media
+    language: en
+    weight: 1
+    enabled: true
+    fetch_interval: daily
+  - id: anildash
+    name: Anil Dash
+    url: https://www.anildash.com/feed.xml
+    category: media
+    language: en
+    weight: 1
+    enabled: true
+    fetch_interval: daily
+  - id: krebs-on-security
+    name: Krebs on Security
+    url: https://krebsonsecurity.com/feed/
+    category: media
+    language: en
+    weight: 1
+    enabled: true
+    fetch_interval: daily
+  - id: steve-blank
+    name: Steve Blank
+    url: https://steveblank.com/feed/
+    category: analysis
+    language: en
+    weight: 1
+    enabled: true
+    fetch_interval: daily
