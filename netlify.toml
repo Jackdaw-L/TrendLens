@@ -3,11 +3,10 @@
   publish = ".next"
 
 [build.environment]
-  NODE_VERSION = "24.14.0"
+  NODE_VERSION = "22.14.0"
   NEXT_TELEMETRY_DISABLED = "1"
 
 [[headers]]
   for = "/manifest.webmanifest"
   [headers.values]
     Content-Type = "application/manifest+json"
-
