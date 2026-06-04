@@ -95,7 +95,7 @@ npm run pipeline
 SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
 ```
 
-线上日更由 `.github/workflows/daily-pipeline.yml` 托管：每天北京时间 08:00 自动运行，也可以在设置页输入口令触发。工作流完成后会调用 `/api/revalidate`，让页面尽快读取 Supabase 中的新结果。
+线上日更由 `.github/workflows/daily-pipeline.yml` 托管：每天北京时间 07:37 自动运行，目标是在 08:00 前完成更新；也可以在设置页输入口令触发。工作流完成后会调用 `/api/revalidate`，让页面尽快读取 Supabase 中的新结果。
 
 ## Prompt 调优
 

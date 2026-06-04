@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Bookmark,
@@ -13,7 +13,9 @@ import {
   Sparkles,
   RefreshCcw,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+
+const RESUME_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 type AppShellProps = {
   children: ReactNode;
@@ -22,6 +24,29 @@ type AppShellProps = {
 };
 
 export function AppShell({ children, footer, className = "" }: AppShellProps) {
+  const router = useRouter();
+  const lastResumeRefreshAtRef = useRef(Date.now());
+
+  useEffect(() => {
+    const refreshIfStale = () => {
+      if (document.visibilityState === "hidden") return;
+
+      const now = Date.now();
+      if (now - lastResumeRefreshAtRef.current < RESUME_REFRESH_INTERVAL_MS) return;
+
+      lastResumeRefreshAtRef.current = now;
+      router.refresh();
+    };
+
+    window.addEventListener("focus", refreshIfStale);
+    document.addEventListener("visibilitychange", refreshIfStale);
+
+    return () => {
+      window.removeEventListener("focus", refreshIfStale);
+      document.removeEventListener("visibilitychange", refreshIfStale);
+    };
+  }, [router]);
+
   return (
     <main className={`app-shell ${className}`}>
       <div className="app-frame">
