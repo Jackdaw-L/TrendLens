@@ -16,24 +16,16 @@ type DispatchResponse =
 const DEFAULT_REPO = "Jackdaw-L/TrendLens";
 const DEFAULT_WORKFLOW = "daily-pipeline.yml";
 const DEFAULT_REF = "main";
-const TEMPORARY_TRIGGER_SECRET = "coffee";
 
 export async function POST(request: NextRequest) {
-  const configuredSecret = process.env.TRENDLENS_TRIGGER_SECRET || TEMPORARY_TRIGGER_SECRET;
+  const configuredSecret = process.env.TRENDLENS_TRIGGER_SECRET?.trim();
   const providedSecret = request.headers.get("x-trendlens-trigger-secret")?.trim();
-
-  if (!providedSecret || providedSecret !== configuredSecret) {
-    return json({ ok: false, error: "Unauthorized." }, 401);
-  }
-
   const token = process.env.GITHUB_ACTIONS_TOKEN;
-  const repo = process.env.GITHUB_ACTIONS_REPO || DEFAULT_REPO;
-  const workflow = process.env.GITHUB_ACTIONS_WORKFLOW || DEFAULT_WORKFLOW;
-  const ref = process.env.GITHUB_ACTIONS_REF || DEFAULT_REF;
   const missing: string[] = [];
+  if (!configuredSecret) missing.push("TRENDLENS_TRIGGER_SECRET");
   if (!token) missing.push("GITHUB_ACTIONS_TOKEN");
 
-  if (missing.length > 0 || !token) {
+  if (missing.length > 0 || !configuredSecret || !token) {
     return json(
       {
         ok: false,
@@ -43,6 +35,14 @@ export async function POST(request: NextRequest) {
       503,
     );
   }
+
+  if (!providedSecret || providedSecret !== configuredSecret) {
+    return json({ ok: false, error: "Unauthorized." }, 401);
+  }
+
+  const repo = process.env.GITHUB_ACTIONS_REPO || DEFAULT_REPO;
+  const workflow = process.env.GITHUB_ACTIONS_WORKFLOW || DEFAULT_WORKFLOW;
+  const ref = process.env.GITHUB_ACTIONS_REF || DEFAULT_REF;
 
   const payload = (await readJson(request)) as Partial<{ reason: string }>;
   const dispatchUrl = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
