@@ -1,9 +1,9 @@
 import { SavedScreen } from "@/components/saved-screen";
-import { loadRadarListDataset } from "@/lib/radar-store";
+import { loadRadarListDataset, loadSavedArticles } from "@/lib/radar-store";
 
-export const revalidate = 180;
+export const dynamic = "force-dynamic";
 
 export default async function SavedPage() {
-  const dataset = await loadRadarListDataset();
-  return <SavedScreen articles={dataset.articles} topics={dataset.topics} />;
+  const [dataset, articles] = await Promise.all([loadRadarListDataset(), loadSavedArticles()]);
+  return <SavedScreen articles={articles} topics={dataset.topics} />;
 }

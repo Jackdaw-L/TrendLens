@@ -1,24 +1,51 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { Bookmark, ArrowRight } from "lucide-react";
 import { AppShell, HeatScore, TopAppBar } from "@/components/app-chrome";
-import { useReadingState } from "@/components/use-reading-state";
 import { getArticleHeatScore, type Article, type Topic } from "@/lib/radar-data";
 
+type SavedArticlesResponse = {
+  articles?: Article[];
+};
+
 export function SavedScreen({ articles, topics }: { articles: Article[]; topics: Topic[] }) {
-  const reading = useReadingState();
-  const { favorites, getFavoriteArticle, hydrated, rememberFavoriteArticles } = reading;
-  const currentArticleById = useMemo(() => new Map(articles.map((article) => [article.id, article])), [articles]);
+  const [savedArticles, setSavedArticles] = useState(articles);
 
   useEffect(() => {
-    rememberFavoriteArticles(articles);
-  }, [articles, rememberFavoriteArticles]);
+    setSavedArticles(articles);
+  }, [articles]);
 
-  const saved = favorites
-    .map((articleId) => getFavoriteArticle(articleId) ?? currentArticleById.get(articleId))
-    .filter((article): article is Article => Boolean(article));
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshSavedArticles() {
+      try {
+        const response = await fetch("/api/favorites?include=articles", {
+          cache: "no-store",
+          headers: {
+            accept: "application/json",
+          },
+        });
+        if (!response.ok) return;
+        const payload = (await response.json()) as SavedArticlesResponse;
+        if (!cancelled && Array.isArray(payload.articles)) {
+          setSavedArticles(payload.articles);
+        }
+      } catch {
+        // The server-rendered list remains usable if this background refresh fails.
+      }
+    }
+
+    void refreshSavedArticles();
+    const retryTimer = window.setTimeout(refreshSavedArticles, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(retryTimer);
+    };
+  }, []);
 
   return (
     <AppShell>
@@ -30,7 +57,7 @@ export function SavedScreen({ articles, topics }: { articles: Article[]; topics:
       </section>
 
       <section className="saved-grid" aria-label="收藏文章">
-        {saved.map((article) => (
+        {savedArticles.map((article) => (
           <Link className="saved-card" href={`/articles/${article.id}`} key={article.id} prefetch>
             <div className="saved-card__meta">
               <span className="source-chip">{article.source}</span>
@@ -49,14 +76,7 @@ export function SavedScreen({ articles, topics }: { articles: Article[]; topics:
           </Link>
         ))}
 
-        {!hydrated && (
-          <div className="empty-card">
-            <strong>正在读取收藏。</strong>
-            <p>稍等一下。</p>
-          </div>
-        )}
-
-        {hydrated && saved.length === 0 && (
+        {savedArticles.length === 0 && (
           <div className="empty-card">
             <strong>还没有收藏。</strong>
             <p>在文章卡片或详情页点收藏后，会出现在这里。</p>

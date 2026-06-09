@@ -39,6 +39,14 @@ const FULL_ARTICLE_COLUMNS = [
   "images",
 ].join(",");
 
+const SAVED_ARTICLE_COLUMNS = [
+  "article_id",
+  "source_run_id",
+  "article_snapshot",
+  "saved_at",
+  "updated_at",
+].join(",");
+
 const RADAR_CACHE_SECONDS = 180;
 
 export type RadarDataset = {
@@ -196,6 +204,37 @@ function articleFromSupabaseRow(row: Record<string, unknown>): Article {
   };
 }
 
+function articleFromSnapshot(value: unknown): Article | null {
+  if (!value || typeof value !== "object") return null;
+
+  const row = value as Partial<Article>;
+  if (typeof row.id !== "string" || typeof row.title !== "string") return null;
+
+  return {
+    id: row.id,
+    topicId: typeof row.topicId === "string" ? row.topicId : "today-radar",
+    source: typeof row.source === "string" ? row.source : "",
+    sourceType: normalizeSourceType(row.sourceType),
+    publishedAt: typeof row.publishedAt === "string" ? row.publishedAt : new Date().toISOString(),
+    originalUrl: typeof row.originalUrl === "string" ? row.originalUrl : "",
+    category: normalizeCategory(row.category),
+    heat: normalizeHeat(row.heat),
+    readingTime: Math.max(1, Number(row.readingTime ?? 4)),
+    tags: normalizeArray<string>(row.tags).map(String),
+    title: row.title,
+    oneSentence: typeof row.oneSentence === "string" ? row.oneSentence : "",
+    whyRecommended: typeof row.whyRecommended === "string" ? row.whyRecommended : "",
+    whyNow: typeof row.whyNow === "string" ? row.whyNow : "",
+    pmAngle: typeof row.pmAngle === "string" ? row.pmAngle : "",
+    bodyBlocks: normalizeArray(row.bodyBlocks) as Article["bodyBlocks"],
+    annotations: normalizeArray(row.annotations) as Article["annotations"],
+    pmTakeaways: normalizeArray<string>(row.pmTakeaways).map(String),
+    relatedIds: normalizeArray<string>(row.relatedIds).map(String),
+    images: normalizeArray(row.images) as Article["images"],
+    heroImage: row.heroImage ?? null,
+  };
+}
+
 function toListArticle(article: Article): Article {
   return {
     ...article,
@@ -311,11 +350,109 @@ async function getRuntimeArticleUncached(id: string) {
     }
   }
 
+  const savedArticle = await getSavedArticle(id);
+  if (savedArticle) {
+    const dataset = await loadRadarListDataset();
+    return {
+      dataset: {
+        ...dataset,
+        articles: [savedArticle, ...dataset.articles.filter((item) => item.id !== savedArticle.id)],
+      },
+      article: savedArticle,
+    };
+  }
+
   const dataset = await loadRadarDataset();
   return {
     dataset,
     article: dataset.articles.find((item) => item.id === id),
   };
+}
+
+export async function loadSavedArticleIds(): Promise<string[]> {
+  const supabase = getSupabaseAdminClient();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("trendlens_saved_articles")
+    .select("article_id")
+    .order("saved_at", { ascending: false });
+
+  if (error) {
+    console.warn(`Failed to load TrendLens saved article ids from Supabase: ${error.message}`);
+    return [];
+  }
+
+  return ((data ?? []) as unknown as Record<string, unknown>[])
+    .map((row) => row.article_id)
+    .filter((articleId): articleId is string => typeof articleId === "string");
+}
+
+export async function loadSavedArticles(): Promise<Article[]> {
+  const supabase = getSupabaseAdminClient();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("trendlens_saved_articles")
+    .select(SAVED_ARTICLE_COLUMNS)
+    .order("saved_at", { ascending: false });
+
+  if (error) {
+    console.warn(`Failed to load TrendLens saved articles from Supabase: ${error.message}`);
+    return [];
+  }
+
+  return ((data ?? []) as unknown as Record<string, unknown>[])
+    .map((row) => articleFromSnapshot(row.article_snapshot))
+    .filter((article): article is Article => Boolean(article));
+}
+
+export async function getSavedArticle(id: string): Promise<Article | null> {
+  const supabase = getSupabaseAdminClient();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("trendlens_saved_articles")
+    .select("article_snapshot")
+    .eq("article_id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`Failed to load TrendLens saved article from Supabase: ${error.message}`);
+    return null;
+  }
+
+  return articleFromSnapshot((data as Record<string, unknown> | null)?.article_snapshot);
+}
+
+export async function findArticleForSaving(id: string): Promise<{ article: Article; runId: string | null } | null> {
+  const supabase = getSupabaseAdminClient();
+
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("trendlens_articles")
+      .select(`${FULL_ARTICLE_COLUMNS},run_id,created_at`)
+      .eq("id", id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.warn(`Failed to load TrendLens article for saving from Supabase: ${error.message}`);
+    }
+
+    if (data) {
+      const row = data as unknown as Record<string, unknown>;
+      return {
+        article: articleFromSupabaseRow(row),
+        runId: typeof row.run_id === "string" ? row.run_id : null,
+      };
+    }
+  }
+
+  const dataset = await loadRadarDataset();
+  const article = dataset.articles.find((item) => item.id === id);
+  return article ? { article, runId: null } : null;
 }
 
 export async function getRuntimeTopic(id: string) {

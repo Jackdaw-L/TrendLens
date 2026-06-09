@@ -1,7 +1,7 @@
 import { ArticleScreen } from "@/components/article-screen";
-import { SavedArticleFallback } from "@/components/saved-article-fallback";
 import type { Article } from "@/lib/radar-data";
-import { getRuntimeArticle, loadRadarListDataset } from "@/lib/radar-store";
+import { getRuntimeArticle, loadRadarListDataset, loadSavedArticleIds } from "@/lib/radar-store";
+import { notFound } from "next/navigation";
 
 export const revalidate = 180;
 
@@ -19,12 +19,13 @@ export default async function ArticlePage({
   const { article, dataset } = await getRuntimeArticle(id);
 
   if (!article) {
-    return <SavedArticleFallback articleId={id} />;
+    notFound();
   }
 
   const related = getRelatedArticles(article, dataset.articles);
+  const favoriteIds = await loadSavedArticleIds();
 
-  return <ArticleScreen article={article} related={related} />;
+  return <ArticleScreen article={article} related={related} initialFavorite={favoriteIds.includes(article.id)} />;
 }
 
 function getRelatedArticles(article: Article, articles: Article[]) {

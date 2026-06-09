@@ -66,6 +66,20 @@ create index if not exists trendlens_articles_id_idx
 create index if not exists trendlens_articles_published_at_idx
   on public.trendlens_articles (published_at desc);
 
+create table if not exists public.trendlens_saved_articles (
+  article_id text primary key,
+  source_run_id uuid references public.trendlens_radar_runs(id) on delete set null,
+  article_snapshot jsonb not null default '{}'::jsonb,
+  saved_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists trendlens_saved_articles_saved_at_idx
+  on public.trendlens_saved_articles (saved_at desc);
+
+create index if not exists trendlens_saved_articles_source_run_id_idx
+  on public.trendlens_saved_articles (source_run_id);
+
 create table if not exists public.trendlens_fetched_articles (
   run_id uuid not null references public.trendlens_radar_runs(id) on delete cascade,
   id text not null,
@@ -84,4 +98,7 @@ create table if not exists public.trendlens_fetched_articles (
 alter table public.trendlens_sources enable row level security;
 alter table public.trendlens_radar_runs enable row level security;
 alter table public.trendlens_articles enable row level security;
+alter table public.trendlens_saved_articles enable row level security;
 alter table public.trendlens_fetched_articles enable row level security;
+
+grant select, insert, update, delete on public.trendlens_saved_articles to service_role;

@@ -16,37 +16,30 @@ import {
   HeaderBar,
 } from "@/components/app-chrome";
 import { LazyImage } from "@/components/lazy-image";
+import { useFavorites } from "@/components/use-favorites";
 import { useReadingState } from "@/components/use-reading-state";
 import type { Annotation, Article, ArticleImage } from "@/lib/radar-data";
 
 export function ArticleScreen({
   article,
   related,
+  initialFavorite,
 }: {
   article: Article;
   related: Article[];
+  initialFavorite: boolean;
 }) {
   const reading = useReadingState();
-  const {
-    isFavorite: getIsFavorite,
-    markRead,
-    rememberFavoriteArticle,
-    toggleFavorite,
-  } = reading;
+  const favorites = useFavorites(initialFavorite ? [article.id] : []);
+  const { markRead } = reading;
   const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
   const [shareStatus, setShareStatus] = useState<"idle" | "done">("idle");
   const heroImage = getHeroImage(article);
-  const isFavorite = getIsFavorite(article.id);
+  const isFavorite = favorites.isFavorite(article.id);
 
   useEffect(() => {
     markRead(article.id);
   }, [article.id, markRead]);
-
-  useEffect(() => {
-    if (isFavorite) {
-      rememberFavoriteArticle(article);
-    }
-  }, [article, isFavorite, rememberFavoriteArticle]);
 
   const annotationMap = useMemo(
     () => new Map(article.annotations.map((annotation) => [annotation.term, annotation])),
@@ -89,7 +82,7 @@ export function ArticleScreen({
         <div className="article-toolbar" aria-label="阅读工具">
           <button
             className={`toolbar-button ${isFavorite ? "is-active" : ""}`}
-            onClick={() => toggleFavorite(article)}
+            onClick={() => void favorites.toggleFavorite(article)}
             type="button"
           >
             <Bookmark
@@ -114,7 +107,7 @@ export function ArticleScreen({
         action={
           <BookmarkButton
             active={isFavorite}
-            onClick={() => toggleFavorite(article)}
+            onClick={() => void favorites.toggleFavorite(article)}
           />
         }
       />
