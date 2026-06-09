@@ -27,14 +27,26 @@ export function ArticleScreen({
   related: Article[];
 }) {
   const reading = useReadingState();
-  const { markRead } = reading;
+  const {
+    isFavorite: getIsFavorite,
+    markRead,
+    rememberFavoriteArticle,
+    toggleFavorite,
+  } = reading;
   const [activeAnnotation, setActiveAnnotation] = useState<Annotation | null>(null);
   const [shareStatus, setShareStatus] = useState<"idle" | "done">("idle");
   const heroImage = getHeroImage(article);
+  const isFavorite = getIsFavorite(article.id);
 
   useEffect(() => {
     markRead(article.id);
   }, [article.id, markRead]);
+
+  useEffect(() => {
+    if (isFavorite) {
+      rememberFavoriteArticle(article);
+    }
+  }, [article, isFavorite, rememberFavoriteArticle]);
 
   const annotationMap = useMemo(
     () => new Map(article.annotations.map((annotation) => [annotation.term, annotation])),
@@ -76,16 +88,16 @@ export function ArticleScreen({
       footer={
         <div className="article-toolbar" aria-label="阅读工具">
           <button
-            className={`toolbar-button ${reading.isFavorite(article.id) ? "is-active" : ""}`}
-            onClick={() => reading.toggleFavorite(article.id)}
+            className={`toolbar-button ${isFavorite ? "is-active" : ""}`}
+            onClick={() => toggleFavorite(article)}
             type="button"
           >
             <Bookmark
               aria-hidden
-              fill={reading.isFavorite(article.id) ? "currentColor" : "none"}
+              fill={isFavorite ? "currentColor" : "none"}
               size={21}
             />
-            <span>{reading.isFavorite(article.id) ? "已收藏" : "收藏"}</span>
+            <span>{isFavorite ? "已收藏" : "收藏"}</span>
           </button>
           <button className="toolbar-button" onClick={shareArticle} type="button">
             {shareStatus === "done" ? <CheckCircle2 aria-hidden size={21} /> : <Share2 aria-hidden size={21} />}
@@ -101,8 +113,8 @@ export function ArticleScreen({
       <HeaderBar
         action={
           <BookmarkButton
-            active={reading.isFavorite(article.id)}
-            onClick={() => reading.toggleFavorite(article.id)}
+            active={isFavorite}
+            onClick={() => toggleFavorite(article)}
           />
         }
       />

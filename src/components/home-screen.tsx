@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Lightbulb, Clock3, ArrowRight } from "lucide-react";
 import {
   AppShell,
@@ -19,9 +19,18 @@ import type { RadarDataset } from "@/lib/radar-store";
 export function HomeScreen({ dataset }: { dataset: RadarDataset }) {
   const router = useRouter();
   const reading = useReadingState();
+  const {
+    hasFavoriteArticleBody,
+    isFavorite,
+    isRead,
+    rememberFavoriteArticle,
+    rememberFavoriteArticles,
+    toggleFavorite,
+  } = reading;
   const [currentDataset, setCurrentDataset] = useState(dataset);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
+  const hydratingFavoritesRef = useRef(new Set<string>());
   const articles = currentDataset.articles;
   const updatedAt = formatDateTime(currentDataset.generatedAt);
 
@@ -36,6 +45,37 @@ export function HomeScreen({ dataset }: { dataset: RadarDataset }) {
       router.prefetch(`/articles/${article.id}`);
     });
   }, [currentDataset.articles, router]);
+
+  const hydrateFavoriteArticle = useCallback(
+    async (articleId: string) => {
+      if (hydratingFavoritesRef.current.has(articleId)) return;
+
+      hydratingFavoritesRef.current.add(articleId);
+      try {
+        const response = await fetch(`/api/articles/${articleId}`, {
+          cache: "no-store",
+          headers: {
+            accept: "application/json",
+          },
+        });
+        if (!response.ok) return;
+        const article = (await response.json()) as Article;
+        rememberFavoriteArticle(article);
+      } finally {
+        hydratingFavoritesRef.current.delete(articleId);
+      }
+    },
+    [rememberFavoriteArticle],
+  );
+
+  useEffect(() => {
+    rememberFavoriteArticles(currentDataset.articles);
+    currentDataset.articles.forEach((article) => {
+      if (isFavorite(article.id) && !hasFavoriteArticleBody(article.id)) {
+        void hydrateFavoriteArticle(article.id);
+      }
+    });
+  }, [currentDataset.articles, hasFavoriteArticleBody, hydrateFavoriteArticle, isFavorite, rememberFavoriteArticles]);
 
   async function refreshList() {
     setRefreshing(true);
@@ -79,10 +119,14 @@ export function HomeScreen({ dataset }: { dataset: RadarDataset }) {
           <ArticleCard
             article={article}
             heatScore={getArticleHeatScore(article, currentDataset.topics)}
-            isFavorite={reading.isFavorite(article.id)}
-            isRead={reading.isRead(article.id)}
+            isFavorite={isFavorite(article.id)}
+            isRead={isRead(article.id)}
             key={article.id}
-            onToggleFavorite={() => reading.toggleFavorite(article.id)}
+            onToggleFavorite={() => {
+              const shouldHydrate = !isFavorite(article.id);
+              toggleFavorite(article);
+              if (shouldHydrate) void hydrateFavoriteArticle(article.id);
+            }}
           />
         ))}
 

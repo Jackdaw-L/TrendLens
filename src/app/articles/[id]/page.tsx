@@ -1,5 +1,5 @@
-import { notFound } from "next/navigation";
 import { ArticleScreen } from "@/components/article-screen";
+import { SavedArticleFallback } from "@/components/saved-article-fallback";
 import type { Article } from "@/lib/radar-data";
 import { getRuntimeArticle, loadRadarListDataset } from "@/lib/radar-store";
 
@@ -19,7 +19,7 @@ export default async function ArticlePage({
   const { article, dataset } = await getRuntimeArticle(id);
 
   if (!article) {
-    notFound();
+    return <SavedArticleFallback articleId={id} />;
   }
 
   const related = getRelatedArticles(article, dataset.articles);
