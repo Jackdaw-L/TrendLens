@@ -49,6 +49,12 @@ const modelCandidateArticles = Number(
 // 跨 run 去重：剔除最近 N 天内已经推荐过的文章，避免连续两天推荐重复内容。
 // 设为 0 可关闭去重。
 const dedupLookbackDays = Number(cli["dedup-days"] ?? env.DEDUP_LOOKBACK_DAYS ?? 3);
+// 抓取与转写并发度：source 级、单 source 内文章级、DeepSeek 逐篇转写级。
+const sourceConcurrency = positiveInteger(cli["source-concurrency"] ?? env.FETCH_SOURCE_CONCURRENCY, 4);
+const articleConcurrency = positiveInteger(env.FETCH_ARTICLE_CONCURRENCY, 3);
+const rewriteConcurrency = positiveInteger(cli["rewrite-concurrency"] ?? env.REWRITE_CONCURRENCY, 2);
+// Supabase 历史 run 保留天数；过期 run 连同其文章、抓取快照一起删除。设为 0 关闭清理。
+const runsRetentionDays = Number(cli["retention-days"] ?? env.RUNS_RETENTION_DAYS ?? 30);
 
 await fs.mkdir(dataDir, { recursive: true });
 await fs.mkdir(logsDir, { recursive: true });
@@ -100,7 +106,8 @@ function parseArgs(args) {
 
 async function loadEnv() {
   const fileEnv = {};
-  for (const file of [".env.example", ".env", ".env.local"]) {
+  // .env.example 只是文档模板，不作为运行时配置来源，避免示例值变成隐藏默认值。
+  for (const file of [".env", ".env.local"]) {
     try {
       const raw = await fs.readFile(path.join(cwd, file), "utf8");
       for (const line of raw.split(/\r?\n/)) {
@@ -132,49 +139,82 @@ async function fetchAllSources({ sourceLimit, itemLimit }) {
     errors: [],
   };
 
+  // source 级并发抓取；结果按输入顺序回收，保证 sources/articles 顺序稳定可复现。
   const seenUrls = new Set();
-  for (const source of enabledSources) {
-    const sourceResult = {
-      id: source.id,
-      name: source.name,
-      url: source.url,
-      category: source.category,
-      language: source.language ?? "en",
-      weight: source.weight ?? 1,
-      status: "ok",
-      itemCount: 0,
-      error: null,
-    };
+  const results = await mapWithConcurrency(enabledSources, sourceConcurrency, (source) =>
+    fetchSingleSource(source, { itemLimit, seenUrls }),
+  );
 
-    try {
-      const feedXml = await fetchText(source.url, { timeoutMs: 15000 });
-      const feed = await parser.parseString(feedXml);
-      const items = (feed.items ?? []).slice(0, itemLimit);
-      sourceResult.itemCount = items.length;
-
-      for (const item of items) {
-        const rawUrl = item.link || item.guid;
-        if (!rawUrl) continue;
-        const canonicalUrl = canonicalizeUrl(rawUrl);
-        if (seenUrls.has(canonicalUrl)) continue;
-        seenUrls.add(canonicalUrl);
-
-        const article = await fetchArticleFromItem(item, source, canonicalUrl);
-        fetched.articles.push(article);
-      }
-    } catch (error) {
-      sourceResult.status = "failed";
-      sourceResult.error = normalizeError(error);
-      fetched.errors.push({
-        sourceId: source.id,
-        message: sourceResult.error,
-      });
-    }
-
-    fetched.sources.push(sourceResult);
+  for (const result of results) {
+    fetched.sources.push(result.sourceResult);
+    fetched.articles.push(...result.articles);
+    if (result.error) fetched.errors.push(result.error);
   }
 
   return fetched;
+}
+
+async function fetchSingleSource(source, { itemLimit, seenUrls }) {
+  const sourceResult = {
+    id: source.id,
+    name: source.name,
+    url: source.url,
+    category: source.category,
+    language: source.language ?? "en",
+    weight: source.weight ?? 1,
+    status: "ok",
+    itemCount: 0,
+    error: null,
+  };
+
+  try {
+    const feedXml = await fetchText(source.url, { timeoutMs: 15000 });
+    const feed = await parser.parseString(feedXml);
+    const items = (feed.items ?? []).slice(0, itemLimit);
+    sourceResult.itemCount = items.length;
+
+    // seenUrls 的判定和登记必须在同一段同步代码里完成，
+    // 否则并发抓取时同一链接可能被两个 source 同时处理。
+    const pendingItems = [];
+    for (const item of items) {
+      const rawUrl = item.link || item.guid;
+      if (!rawUrl) continue;
+      const canonicalUrl = canonicalizeUrl(rawUrl);
+      if (seenUrls.has(canonicalUrl)) continue;
+      seenUrls.add(canonicalUrl);
+      pendingItems.push({ item, canonicalUrl });
+    }
+
+    const articles = await mapWithConcurrency(pendingItems, articleConcurrency, ({ item, canonicalUrl }) =>
+      fetchArticleFromItem(item, source, canonicalUrl),
+    );
+
+    return { sourceResult, articles, error: null };
+  } catch (error) {
+    sourceResult.status = "failed";
+    sourceResult.error = normalizeError(error);
+    return {
+      sourceResult,
+      articles: [],
+      error: { sourceId: source.id, message: sourceResult.error },
+    };
+  }
+}
+
+// 简单并发池：最多 limit 个任务同时进行，结果数组与输入顺序一一对应。
+async function mapWithConcurrency(items, limit, task) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function loadPipelineSources() {
@@ -575,9 +615,13 @@ async function loadRecentlyRecommendedIds(days) {
 
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   try {
+    // 只统计转写成功的 run（deepseek / 历史遗留的 friday 模式）。
+    // 失败回退 run（fetched 模式）里的文章并没有真正被推荐过，
+    // 若计入去重，「失败后手动重跑」会把最优候选剔掉。
     const { data, error } = await supabase
       .from("trendlens_articles")
-      .select("id, created_at")
+      .select("id, created_at, trendlens_radar_runs!inner(mode)")
+      .in("trendlens_radar_runs.mode", ["deepseek", "friday"])
       .gte("created_at", cutoff);
     if (error) throw error;
     return new Set((data ?? []).map((row) => String(row.id)));
@@ -612,62 +656,66 @@ async function callDeepSeekForRewrite(selection, articles) {
   const selectionById = new Map(selection.articles.map((article) => [article.id, article]));
   const contentChars = positiveInteger(env.FRIDAY_REWRITE_CONTENT_CHARS, 12000);
   const maxAttempts = positiveInteger(env.FRIDAY_REWRITE_ATTEMPTS, 2);
-  const rewrittenArticles = [];
-  const failures = [];
 
-  for (const sourceArticle of articles) {
-    const inputArticle = buildRewriteInputArticle(sourceArticle, {
+  // 逐篇转写彼此独立，按 rewriteConcurrency 并发执行；结果按输入顺序回收。
+  const results = await mapWithConcurrency(articles, rewriteConcurrency, (sourceArticle) =>
+    rewriteSingleArticle(sourceArticle, {
       contentChars,
+      maxAttempts,
       selection: selectionById.get(sourceArticle.id),
-    });
-    let lastError = "";
-    let lastIssues = [];
+    }),
+  );
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const rewrite = await callDeepSeekForRewriteArticle(inputArticle, {
-          attempt,
-          previousIssues: lastIssues.length ? lastIssues : lastError ? [lastError] : [],
-        });
-        const article = extractRewriteArticle(rewrite, inputArticle.id);
-        const issues = validateRewrittenArticle(article, inputArticle);
+  return {
+    articles: results.filter((result) => result.article).map((result) => result.article),
+    failures: results.filter((result) => result.failure).map((result) => result.failure),
+  };
+}
 
-        if (issues.length === 0) {
-          rewrittenArticles.push(article);
-          lastIssues = [];
-          lastError = "";
-          break;
-        }
+async function rewriteSingleArticle(sourceArticle, { contentChars, maxAttempts, selection }) {
+  const inputArticle = buildRewriteInputArticle(sourceArticle, { contentChars, selection });
+  let lastError = "";
+  let lastIssues = [];
 
-        lastIssues = issues;
-        lastError = issues.join("; ");
-        await writeModelLog("rewrite", {
-          event: "validation_failed",
-          articleId: inputArticle.id,
-          articleTitle: inputArticle.title,
-          attempt,
-          validationIssues: issues,
-          parsedJson: rewrite,
-        });
-      } catch (error) {
-        lastError = normalizeError(error);
-        lastIssues = [lastError];
-      }
-    }
-
-    if (lastError || lastIssues.length) {
-      failures.push({
-        id: inputArticle.id,
-        title: inputArticle.selection?.title || inputArticle.title,
-        source: inputArticle.source,
-        url: inputArticle.url,
-        reason: lastIssues.length ? lastIssues.join("; ") : lastError,
-        attempts: maxAttempts,
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const rewrite = await callDeepSeekForRewriteArticle(inputArticle, {
+        attempt,
+        previousIssues: lastIssues.length ? lastIssues : lastError ? [lastError] : [],
       });
+      const article = extractRewriteArticle(rewrite, inputArticle.id);
+      const issues = validateRewrittenArticle(article, inputArticle);
+
+      if (issues.length === 0) {
+        return { article };
+      }
+
+      lastIssues = issues;
+      lastError = issues.join("; ");
+      await writeModelLog("rewrite", {
+        event: "validation_failed",
+        articleId: inputArticle.id,
+        articleTitle: inputArticle.title,
+        attempt,
+        validationIssues: issues,
+        parsedJson: rewrite,
+      });
+    } catch (error) {
+      lastError = normalizeError(error);
+      lastIssues = [lastError];
     }
   }
 
-  return { articles: rewrittenArticles, failures };
+  return {
+    failure: {
+      id: inputArticle.id,
+      title: inputArticle.selection?.title || inputArticle.title,
+      source: inputArticle.source,
+      url: inputArticle.url,
+      reason: lastIssues.length ? lastIssues.join("; ") : lastError,
+      attempts: maxAttempts,
+    },
+  };
 }
 
 function buildRewriteInputArticle(article, { contentChars, selection }) {
@@ -1702,10 +1750,40 @@ async function persistPipelineResult({ fetched, radar }) {
       })),
     );
 
-    return { provider: "supabase", status: "ok", runId: run.id };
+    const cleanup = await cleanupExpiredRuns(supabase);
+    return { provider: "supabase", status: "ok", runId: run.id, cleanup };
   } catch (error) {
     console.warn(`Failed to persist TrendLens data to Supabase: ${normalizeError(error)}`);
     return { provider: "supabase", status: "failed", error: normalizeError(error) };
+  }
+}
+
+// 清理过期 run：删除 generated_at 早于保留窗口的 run，
+// trendlens_articles / trendlens_fetched_articles 通过外键 cascade 一并删除。
+// 收藏不受影响：快照存在 trendlens_saved_articles.article_snapshot，
+// source_run_id 的外键是 on delete set null。
+// 本函数只在新 run 落库成功后调用，新 run 的 generated_at 必然晚于 cutoff，不会误删。
+async function cleanupExpiredRuns(supabase) {
+  if (runsRetentionDays <= 0) return { status: "disabled" };
+
+  const cutoff = new Date(Date.now() - runsRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from("trendlens_radar_runs")
+      .delete()
+      .lt("generated_at", cutoff)
+      .select("id");
+    if (error) throw error;
+
+    const removed = data?.length ?? 0;
+    if (removed > 0) {
+      console.log(`[cleanup] 已删除 ${removed} 个超过 ${runsRetentionDays} 天的历史 run（含其文章与抓取快照）。`);
+    }
+    return { status: "ok", removedRuns: removed, retentionDays: runsRetentionDays };
+  } catch (error) {
+    // 清理失败不影响本次结果，只提示。
+    console.warn(`[cleanup] 清理历史 run 失败：${normalizeError(error)}`);
+    return { status: "failed", error: normalizeError(error) };
   }
 }
 

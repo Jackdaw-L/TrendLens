@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getConfiguredWriteSecret, readProvidedSecret, secretsMatch } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -18,8 +19,9 @@ const DEFAULT_WORKFLOW = "daily-pipeline.yml";
 const DEFAULT_REF = "main";
 
 export async function POST(request: NextRequest) {
-  const configuredSecret = process.env.TRENDLENS_TRIGGER_SECRET?.trim();
-  const providedSecret = request.headers.get("x-trendlens-trigger-secret")?.trim();
+  const configuredSecret = getConfiguredWriteSecret();
+  // 同时接受 x-trendlens-secret（应用内统一口令头）和旧的 x-trendlens-trigger-secret。
+  const providedSecret = readProvidedSecret(request);
   const token = process.env.GITHUB_ACTIONS_TOKEN;
   const missing: string[] = [];
   if (!configuredSecret) missing.push("TRENDLENS_TRIGGER_SECRET");
@@ -36,7 +38,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!providedSecret || providedSecret !== configuredSecret) {
+  if (!providedSecret || !secretsMatch(providedSecret, configuredSecret)) {
     return json({ ok: false, error: "Unauthorized." }, 401);
   }
 

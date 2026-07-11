@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireWriteSecret } from "@/lib/api-auth";
 import {
   deleteSource,
   loadSourceConfigs,
@@ -13,6 +14,9 @@ export async function GET() {
 }
 
 export async function PATCH(request: NextRequest) {
+  const unauthorized = requireWriteSecret(request);
+  if (unauthorized) return unauthorized;
+
   const payload = (await request.json()) as Partial<{ id: string; enabled: boolean }>;
 
   if (!payload.id || typeof payload.enabled !== "boolean") {
@@ -24,6 +28,9 @@ export async function PATCH(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const unauthorized = requireWriteSecret(request);
+  if (unauthorized) return unauthorized;
+
   const payload = (await request.json()) as Partial<{ id: string }>;
 
   if (!payload.id) {

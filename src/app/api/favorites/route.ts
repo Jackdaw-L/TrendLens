@@ -1,5 +1,6 @@
 import { revalidatePath } from "next/cache";
 import { NextRequest, NextResponse } from "next/server";
+import { requireWriteSecret } from "@/lib/api-auth";
 import { findArticleForSaving, loadSavedArticleIds, loadSavedArticles } from "@/lib/radar-store";
 import { getSupabaseAdminClient } from "@/lib/supabase-server";
 
@@ -34,6 +35,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const unauthorized = requireWriteSecret(request);
+  if (unauthorized) return unauthorized;
+
   const articleId = await readArticleId(request);
   if (!articleId) return jsonResponse({ error: "articleId is required." }, 400);
 
@@ -65,6 +69,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const unauthorized = requireWriteSecret(request);
+  if (unauthorized) return unauthorized;
+
   const articleId = await readArticleId(request);
   if (!articleId) return jsonResponse({ error: "articleId is required." }, 400);
 

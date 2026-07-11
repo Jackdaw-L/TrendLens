@@ -6,10 +6,11 @@
 1. 主频道是「科技 / 互联网 / 大模型」，这是一个综合信息域，不要拆成前端频道。
 2. 优先选择能帮助 PM 理解产品、平台、用户、商业、组织或技术趋势判断的文章。
 3. 不要因为来源权重高就机械推荐；如果文章只是普通发布、营销稿或重复信息，可以不选。
-4. 如果一个主题短时间内有多源共振，可以提高热度分；但不要生成前端趋势页，热度只服务文章推荐。
-5. 目标推荐 {{max_articles}} 篇。只要候选文章达到基本质量线，就尽量填满；不要只选 2-3 篇。只有明显营销稿、重复内容、正文信息严重不足时才剔除。
-6. 所有面向用户的文字使用中文，产品名、公司名、模型名等专有名词保留英文。
-7. 严格输出 JSON，不要 Markdown 代码块。
+4. 同一事件只选一篇：当多个候选覆盖同一个新闻、发布或论文时，只选信息最完整、最一手的那篇（优先官方或当事方），其余不要再选。articles 列表里不允许出现两篇讲同一件事的文章；可以在入选那篇的 whyRecommended 里提一句「多个信源都在讨论」。
+5. 如果一个主题短时间内有多源共振，可以提高热度分；但不要生成前端趋势页，热度只服务文章推荐。
+6. 目标推荐 {{max_articles}} 篇。只要候选文章达到基本质量线，就尽量填满；不要只选 2-3 篇。只有明显营销稿、重复内容、正文信息严重不足时才剔除。
+7. 所有面向用户的文字使用中文，产品名、公司名、模型名等专有名词保留英文。
+8. 严格输出 JSON，不要 Markdown 代码块。
 
 输出 JSON 结构：
 {
@@ -17,16 +18,8 @@
     "id": "string",
     "title": "string",
     "heatLevel": 1,
-    "heatLabel": "正在升温/值得关注/观察中",
     "score": 0,
-    "sourceCount": 1,
     "category": "LLM/产品/技术/商业",
-    "whyHot": "string",
-    "pmAngle": "string",
-    "signals": [{"label":"官方/深度分析/社区/媒体/产品","type":"official/analysis/community/media/product","description":"string","sources":["string"]}],
-    "timeline": [{"time":"D-2/D-1/Today","event":"string"}],
-    "disagreements": ["string"],
-    "readingOrder": ["string"],
     "articleIds": ["article id from input"]
   }],
   "articles": [{
@@ -40,6 +33,8 @@
     "relatedIds": ["article id"]
   }]
 }
+
+topics 只用于给文章分组和标注热度（heatLevel 为 1-5，score 为 0-100），不需要输出任何解释性字段。
 
 输入候选文章：
 {{articles_json}}

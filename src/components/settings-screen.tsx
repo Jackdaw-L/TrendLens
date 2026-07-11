@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState, useTransition, type FormEvent } from "react";
+import { useEffect, useMemo, useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, RefreshCcw, Rss, Trash2, X } from "lucide-react";
+import { KeyRound, Plus, RefreshCcw, Rss, Trash2, X } from "lucide-react";
 import {
   AppShell,
   RefreshButton,
@@ -11,8 +11,15 @@ import {
   sourceLabel,
 } from "@/components/app-chrome";
 import { useReadingState } from "@/components/use-reading-state";
+import { appSecretHeaders, getAppSecret, setAppSecret } from "@/lib/app-secret";
 import type { RadarDataset } from "@/lib/radar-store";
 import type { SourceConfig } from "@/lib/source-store";
+
+function writeErrorFeedback(status: number, fallback: string) {
+  if (status === 401) return "口令不正确，请先在「操作口令」里保存正确口令";
+  if (status === 503) return "服务端未配置口令，暂时无法执行写操作";
+  return fallback;
+}
 
 type RuntimeSource = {
   id: string;
@@ -36,7 +43,14 @@ export function SettingsScreen({
   const [isRecommendationDialogOpen, setRecommendationDialogOpen] = useState(false);
   const [recommendationSecret, setRecommendationSecret] = useState("");
   const [isTriggeringRecommendation, setTriggeringRecommendation] = useState(false);
+  const [appSecretInput, setAppSecretInput] = useState("");
+  const [hasStoredSecret, setHasStoredSecret] = useState(false);
+  const [isSavingSecret, setSavingSecret] = useState(false);
   const [isRefreshing, startRefreshTransition] = useTransition();
+
+  useEffect(() => {
+    setHasStoredSecret(Boolean(getAppSecret()));
+  }, []);
   const runtimeById = useMemo(() => {
     return new Map(dataset.sources.map(normalizeRuntimeSource).map((source) => [source.id, source]));
   }, [dataset.sources]);
@@ -49,10 +63,13 @@ export function SettingsScreen({
     try {
       const response = await fetch("/api/sources", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...appSecretHeaders() },
         body: JSON.stringify({ id: source.id, enabled: nextEnabled }),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        setFeedback(writeErrorFeedback(response.status, "更新失败，请稍后重试"));
+        return;
+      }
       const payload = (await response.json()) as { sources: SourceConfig[] };
       setSources(payload.sources);
       setFeedback(nextEnabled ? "已启用信息源" : "已停用信息源");
@@ -74,10 +91,13 @@ export function SettingsScreen({
     try {
       const response = await fetch("/api/sources", {
         method: "DELETE",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...appSecretHeaders() },
         body: JSON.stringify({ id: source.id }),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        setFeedback(writeErrorFeedback(response.status, "删除失败，请稍后重试"));
+        return;
+      }
       const payload = (await response.json()) as { sources: SourceConfig[] };
       setSources(payload.sources);
       setFeedback("已删除信息源");
@@ -109,7 +129,7 @@ export function SettingsScreen({
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-trendlens-trigger-secret": secret,
+          "x-trendlens-secret": secret,
         },
         body: JSON.stringify({ reason: "settings-button" }),
       });
@@ -134,6 +154,9 @@ export function SettingsScreen({
         return;
       }
 
+      // 触发成功说明口令正确，顺手保存到本机，收藏和信息源管理可以直接复用。
+      setAppSecret(secret);
+      setHasStoredSecret(true);
       setRecommendationDialogOpen(false);
       setRecommendationSecret("");
       setFeedback("已启动更新推荐，完成后首页会读取最新结果");
@@ -141,6 +164,46 @@ export function SettingsScreen({
       setFeedback("启动更新失败，请稍后重试");
     } finally {
       setTriggeringRecommendation(false);
+    }
+  }
+
+  async function saveAppSecret(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const secret = appSecretInput.trim();
+    setFeedback(null);
+
+    if (!secret) {
+      setAppSecret("");
+      setHasStoredSecret(false);
+      setFeedback("已清除本机口令");
+      return;
+    }
+
+    setSavingSecret(true);
+    try {
+      const response = await fetch("/api/auth/verify", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "x-trendlens-secret": secret },
+      });
+
+      if (response.status === 401) {
+        setFeedback("口令不正确");
+        return;
+      }
+      if (!response.ok) {
+        setFeedback("服务端还未配置口令（TRENDLENS_TRIGGER_SECRET）");
+        return;
+      }
+
+      setAppSecret(secret);
+      setHasStoredSecret(true);
+      setAppSecretInput("");
+      setFeedback("口令已保存，本机的收藏、信息源管理和更新推荐会自动使用");
+    } catch {
+      setFeedback("校验口令失败，请稍后重试");
+    } finally {
+      setSavingSecret(false);
     }
   }
 
@@ -165,7 +228,7 @@ export function SettingsScreen({
           className="primary-pill"
           onClick={() => {
             setFeedback(null);
-            setRecommendationSecret("");
+            setRecommendationSecret(getAppSecret());
             setRecommendationDialogOpen(true);
           }}
           type="button"
@@ -175,13 +238,39 @@ export function SettingsScreen({
         </button>
       </div>
 
+      {feedback && <p className="settings-feedback">{feedback}</p>}
+
+      <section className="source-section" aria-label="操作口令">
+        <div className="section-title-row">
+          <h2>操作口令</h2>
+          <span>{hasStoredSecret ? "本机已保存" : "未设置"}</span>
+        </div>
+        <form className="secret-row" onSubmit={saveAppSecret}>
+          <div className="secret-row__icon">
+            <KeyRound aria-hidden size={19} />
+          </div>
+          <input
+            autoComplete="off"
+            disabled={isSavingSecret}
+            onChange={(event) => setAppSecretInput(event.target.value)}
+            placeholder={hasStoredSecret ? "重新输入可更换口令" : "输入操作口令"}
+            type="password"
+            value={appSecretInput}
+          />
+          <button className="secondary-pill" disabled={isSavingSecret} type="submit">
+            {isSavingSecret ? "校验中" : "保存"}
+          </button>
+        </form>
+        <p className="secret-hint">
+          收藏、信息源管理和更新推荐共用这一个口令；输入一次后保存在本机浏览器。留空提交可清除。
+        </p>
+      </section>
+
       <section className="source-section">
         <div className="section-title-row">
           <h2>信息源列表</h2>
           <span>{sources.length} 个</span>
         </div>
-
-        {feedback && <p className="settings-feedback">{feedback}</p>}
 
         <div className="source-list">
           {sources.map((source) => {

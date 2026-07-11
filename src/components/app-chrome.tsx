@@ -174,6 +174,28 @@ export function BookmarkButton({
   );
 }
 
+export function Toast({ message, onDismiss }: { message: string | null; onDismiss: () => void }) {
+  const dismissRef = useRef(onDismiss);
+
+  useEffect(() => {
+    dismissRef.current = onDismiss;
+  });
+
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => dismissRef.current(), 2600);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+
+  if (!message) return null;
+
+  return (
+    <div className="app-toast" role="status">
+      {message}
+    </div>
+  );
+}
+
 export function HeatScore({ value }: { value: number }) {
   return (
     <span className="heat-score" aria-label={`热度 ${value}`}>

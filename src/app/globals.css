@@ -1074,7 +1074,8 @@ svg {
   line-height: 1.4;
 }
 
-.password-field input {
+.password-field input,
+.secret-row input {
   width: 100%;
   min-height: 48px;
   border: 1px solid rgba(196, 199, 199, 0.9);
@@ -1087,9 +1088,58 @@ svg {
   padding: 0 14px;
 }
 
-.password-field input:focus {
+.password-field input:focus,
+.secret-row input:focus {
   border-color: var(--secondary);
   box-shadow: 0 0 0 3px rgba(83, 98, 84, 0.14);
+}
+
+.secret-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.secret-row__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: var(--surface-container);
+  color: var(--muted);
+}
+
+.secret-row .secondary-pill {
+  min-height: 48px;
+  padding: 0 18px;
+}
+
+.secret-hint {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  z-index: 120;
+  transform: translateX(-50%);
+  max-width: min(calc(100vw - 48px), 360px);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: rgba(26, 28, 27, 0.92);
+  color: #f7f6f1;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  box-shadow: var(--shadow-strong);
+  animation: slideFadeIn 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .dialog-actions {

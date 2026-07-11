@@ -9,10 +9,11 @@ import {
   BookmarkButton,
   HeatScore,
   RefreshButton,
+  Toast,
   TopAppBar,
   formatDateTime,
 } from "@/components/app-chrome";
-import { useFavorites } from "@/components/use-favorites";
+import { favoriteErrorMessage, useFavorites } from "@/components/use-favorites";
 import { useReadingState } from "@/components/use-reading-state";
 import { getArticleHeatScore, type Article } from "@/lib/radar-data";
 import type { RadarDataset } from "@/lib/radar-store";
@@ -31,6 +32,7 @@ export function HomeScreen({
   const [currentDataset, setCurrentDataset] = useState(dataset);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const articles = currentDataset.articles;
   const updatedAt = formatDateTime(currentDataset.generatedAt);
 
@@ -91,7 +93,9 @@ export function HomeScreen({
             isFavorite={favorites.isFavorite(article.id)}
             isRead={isRead(article.id)}
             key={article.id}
-            onToggleFavorite={() => void favorites.toggleFavorite(article)}
+            onToggleFavorite={() => {
+              favorites.toggleFavorite(article).catch((error) => setToast(favoriteErrorMessage(error)));
+            }}
           />
         ))}
 
@@ -107,6 +111,8 @@ export function HomeScreen({
         <span aria-hidden>∞</span>
         <p>今天先读到这里。</p>
       </div>
+
+      <Toast message={toast} onDismiss={() => setToast(null)} />
     </AppShell>
   );
 }
