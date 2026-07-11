@@ -1123,6 +1123,102 @@ svg {
   line-height: 1.7;
 }
 
+.proposal-module {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid rgba(214, 231, 213, 0.9);
+  border-radius: 18px;
+  background: rgba(214, 231, 213, 0.24);
+}
+
+.proposal-module__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-secondary-container);
+}
+
+.proposal-module__title strong {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.proposal-module__title span {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.proposal-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(226, 227, 225, 0.9);
+  border-radius: 14px;
+  background: var(--surface-lowest);
+}
+
+.proposal-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-card header strong {
+  color: var(--primary);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.proposal-badge {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.proposal-badge.is-add {
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
+
+.proposal-badge.is-remove {
+  background: var(--tertiary-soft);
+  color: var(--tertiary-container);
+}
+
+.proposal-card__url {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.proposal-card__reason {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.proposal-card__actions {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.proposal-card__actions .primary-pill,
+.proposal-card__actions .secondary-pill {
+  min-height: 42px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
 .app-toast {
   position: fixed;
   left: 50%;

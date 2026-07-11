@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { KeyRound, Plus, RefreshCcw, Rss, Trash2, X } from "lucide-react";
+import { KeyRound, Plus, RefreshCcw, Rss, Sparkles, Trash2, X } from "lucide-react";
 import {
   AppShell,
   RefreshButton,
@@ -12,6 +12,7 @@ import {
 } from "@/components/app-chrome";
 import { useReadingState } from "@/components/use-reading-state";
 import { appSecretHeaders, getAppSecret, setAppSecret } from "@/lib/app-secret";
+import type { SourceProposal } from "@/lib/proposal-store";
 import type { RadarDataset } from "@/lib/radar-store";
 import type { SourceConfig } from "@/lib/source-store";
 
@@ -31,13 +32,17 @@ type RuntimeSource = {
 export function SettingsScreen({
   dataset,
   initialSources,
+  initialProposals = [],
 }: {
   dataset: RadarDataset;
   initialSources: SourceConfig[];
+  initialProposals?: SourceProposal[];
 }) {
   const router = useRouter();
   const reading = useReadingState();
   const [sources, setSources] = useState(initialSources);
+  const [proposals, setProposals] = useState(initialProposals);
+  const [busyProposalId, setBusyProposalId] = useState<string | null>(null);
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [isRecommendationDialogOpen, setRecommendationDialogOpen] = useState(false);
@@ -105,6 +110,45 @@ export function SettingsScreen({
       setFeedback("删除失败，请稍后重试");
     } finally {
       setBusySourceId(null);
+    }
+  }
+
+  async function handleProposal(proposal: SourceProposal, action: "accept" | "dismiss") {
+    if (
+      action === "accept" &&
+      proposal.type === "remove" &&
+      !window.confirm(`删除信息源「${proposal.name}」？历史文章会保留，且不会被自动重新添加。`)
+    ) {
+      return;
+    }
+
+    setBusyProposalId(proposal.id);
+    setFeedback(null);
+
+    try {
+      const response = await fetch("/api/source-proposals", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...appSecretHeaders() },
+        body: JSON.stringify({ id: proposal.id, action }),
+      });
+      if (!response.ok) {
+        setFeedback(writeErrorFeedback(response.status, "处理建议失败，请稍后重试"));
+        return;
+      }
+      const payload = (await response.json()) as { sources: SourceConfig[]; proposals: SourceProposal[] };
+      setSources(payload.sources);
+      setProposals(payload.proposals);
+      setFeedback(
+        action === "dismiss"
+          ? "已忽略该建议"
+          : proposal.type === "add"
+            ? `已添加信息源「${proposal.name}」，下次更新推荐时开始抓取`
+            : `已删除信息源「${proposal.name}」`,
+      );
+    } catch {
+      setFeedback("处理建议失败，请稍后重试");
+    } finally {
+      setBusyProposalId(null);
     }
   }
 
@@ -271,6 +315,49 @@ export function SettingsScreen({
           <h2>信息源列表</h2>
           <span>{sources.length} 个</span>
         </div>
+
+        {proposals.length > 0 && (
+          <div className="proposal-module" aria-label="信源建议">
+            <div className="proposal-module__title">
+              <Sparkles aria-hidden size={16} />
+              <strong>每周信源建议</strong>
+              <span>{proposals.length} 条待确认</span>
+            </div>
+            {proposals.map((proposal) => {
+              const busy = busyProposalId === proposal.id;
+              return (
+                <article className="proposal-card" key={proposal.id}>
+                  <header>
+                    <span className={`proposal-badge ${proposal.type === "add" ? "is-add" : "is-remove"}`}>
+                      {proposal.type === "add" ? "建议新增" : "建议删除"}
+                    </span>
+                    <strong>{proposal.name}</strong>
+                  </header>
+                  {proposal.url && <p className="proposal-card__url">{proposal.url}</p>}
+                  <p className="proposal-card__reason">{proposal.reason}</p>
+                  <div className="proposal-card__actions">
+                    <button
+                      className="secondary-pill"
+                      disabled={busy}
+                      onClick={() => handleProposal(proposal, "dismiss")}
+                      type="button"
+                    >
+                      忽略
+                    </button>
+                    <button
+                      className="primary-pill"
+                      disabled={busy}
+                      onClick={() => handleProposal(proposal, "accept")}
+                      type="button"
+                    >
+                      {busy ? "处理中" : proposal.type === "add" ? "添加" : "删除"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
 
         <div className="source-list">
           {sources.map((source) => {

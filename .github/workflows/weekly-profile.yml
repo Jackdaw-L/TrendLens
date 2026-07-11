@@ -1,0 +1,51 @@
+name: Update TrendLens interest profile
+
+on:
+  schedule:
+    # 21:07 Asia/Shanghai, Sunday. 周一早上的日推即可用上新画像。GitHub cron 用 UTC。
+    - cron: "7 13 * * 0"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this run was started
+        required: false
+        default: manual
+
+concurrency:
+  group: trendlens-weekly-profile
+  cancel-in-progress: false
+
+jobs:
+  update-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEEPSEEK_API_URL: https://api.deepseek.com/chat/completions
+      DEEPSEEK_MODEL: deepseek-v4-pro
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_THINKING: disabled
+      DEEPSEEK_MAX_TOKENS: "12000"
+      DEEPSEEK_ATTEMPTS: "2"
+      DEEPSEEK_TIMEOUT_MS: "180000"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      PROFILE_WINDOW_DAYS: "14"
+      PROFILE_MAX_NEW_SOURCES: "2"
+      PROFILE_REMOVE_FAIL_STREAK: "7"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+
+      - name: Set up pnpm
+        run: npm install -g pnpm@10.18.0
+
+      - name: Install dependencies
+        run: pnpm install --prod --no-frozen-lockfile --ignore-scripts
+
+      - name: Update interest profile, source weights, and source proposals
+        run: node scripts/weekly-profile.mjs

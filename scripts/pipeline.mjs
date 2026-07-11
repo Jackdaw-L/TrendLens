@@ -18,6 +18,8 @@ const defaultSelectSystemPromptPath = path.join(promptDir, "select-system.md");
 const defaultSelectUserPromptPath = path.join(promptDir, "select-user.md");
 const defaultRewriteSystemPromptPath = path.join(promptDir, "rewrite-system.md");
 const defaultRewriteUserPromptPath = path.join(promptDir, "rewrite-user.md");
+const defaultReviewSystemPromptPath = path.join(promptDir, "review-system.md");
+const defaultReviewUserPromptPath = path.join(promptDir, "review-user.md");
 const parser = new Parser({
   customFields: {
     item: [
@@ -55,6 +57,10 @@ const articleConcurrency = positiveInteger(env.FETCH_ARTICLE_CONCURRENCY, 3);
 const rewriteConcurrency = positiveInteger(cli["rewrite-concurrency"] ?? env.REWRITE_CONCURRENCY, 2);
 // Supabase 历史 run 保留天数；过期 run 连同其文章、抓取快照一起删除。设为 0 关闭清理。
 const runsRetentionDays = Number(cli["retention-days"] ?? env.RUNS_RETENTION_DAYS ?? 30);
+// 转写忠实性复核：转写通过结构校验后，再调一次模型对照原文找编造/错乱；
+// 判 fail 则打回重写（与结构校验共用 FRIDAY_REWRITE_ATTEMPTS 次数上限），
+// 复核调用本身故障时放行（护栏故障不应阻断整期日推）。设为 0 关闭。
+const rewriteReviewEnabled = (cli["review"] ?? env.REWRITE_REVIEW_ENABLED ?? "1") !== "0";
 
 await fs.mkdir(dataDir, { recursive: true });
 await fs.mkdir(logsDir, { recursive: true });
@@ -647,15 +653,45 @@ async function callDeepSeekForSelection(articles, { maxArticles }) {
   const { systemPrompt, userPrompt } = await loadPromptPair("select", {
     articles_json: JSON.stringify(compactArticles),
     max_articles: String(maxArticles),
+    interest_profile: await loadLatestInterestProfile(),
   });
 
   return callDeepSeekJson({ systemPrompt, userPrompt, stage: "select" });
 }
 
+// 读取每周任务维护的最新兴趣画像，注入选文 prompt。
+// 读不到（表未建 / 还没跑过每周任务 / 网络失败）时退化为通用画像文案，不阻断选文。
+async function loadLatestInterestProfile() {
+  const fallback = "（暂无读者画像数据：按面向互联网 PM 的通用偏好筛选。）";
+  const supabase = createSupabaseClientFromEnv();
+  if (!supabase) return fallback;
+
+  try {
+    const { data, error } = await supabase
+      .from("trendlens_profile")
+      .select("profile_text, selection_guidance, generated_at")
+      .order("generated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data?.profile_text) return fallback;
+
+    const generatedDate = String(data.generated_at ?? "").slice(0, 10);
+    const parts = [`【画像 · 更新于 ${generatedDate}】`, String(data.profile_text)];
+    if (data.selection_guidance) {
+      parts.push("【近期筛选策略】", String(data.selection_guidance));
+    }
+    return parts.join("\n");
+  } catch (error) {
+    console.warn(`[profile] 读取兴趣画像失败，使用通用画像：${normalizeError(error)}`);
+    return fallback;
+  }
+}
+
 async function callDeepSeekForRewrite(selection, articles) {
   const selectionById = new Map(selection.articles.map((article) => [article.id, article]));
   const contentChars = positiveInteger(env.FRIDAY_REWRITE_CONTENT_CHARS, 12000);
-  const maxAttempts = positiveInteger(env.FRIDAY_REWRITE_ATTEMPTS, 2);
+  const maxAttempts = positiveInteger(env.FRIDAY_REWRITE_ATTEMPTS, 3);
 
   // 逐篇转写彼此独立，按 rewriteConcurrency 并发执行；结果按输入顺序回收。
   const results = await mapWithConcurrency(articles, rewriteConcurrency, (sourceArticle) =>
@@ -687,7 +723,25 @@ async function rewriteSingleArticle(sourceArticle, { contentChars, maxAttempts, 
       const issues = validateRewrittenArticle(article, inputArticle);
 
       if (issues.length === 0) {
-        return { article };
+        // 结构校验通过后做忠实性复核：对照原文找编造/错乱，判 fail 则打回重写。
+        const review = await reviewRewrittenArticle(article, inputArticle, { attempt });
+        if (review.verdict === "pass") {
+          return { article };
+        }
+
+        lastIssues = review.issues.map(
+          (issue) => `忠实性复核未通过：${issue.problem}（转写句：${issue.quote}；原文依据：${issue.evidence}）`,
+        );
+        lastError = lastIssues.join("; ");
+        await writeModelLog("review", {
+          event: "review_failed",
+          articleId: inputArticle.id,
+          articleTitle: inputArticle.title,
+          attempt,
+          reviewIssues: review.issues,
+          parsedJson: rewrite,
+        });
+        continue;
       }
 
       lastIssues = issues;
@@ -718,6 +772,63 @@ async function rewriteSingleArticle(sourceArticle, { contentChars, maxAttempts, 
   };
 }
 
+// 忠实性复核：对照转写者实际看到的原文材料（截断后的 content）核查转写稿。
+// 返回 { verdict: "pass" | "fail", issues: [...] }。
+// 复核调用自身出错（超时/接口故障）时放行（fail-open）：护栏故障不应把合格文章挡在日推之外。
+async function reviewRewrittenArticle(article, inputArticle, { attempt }) {
+  if (!rewriteReviewEnabled) return { verdict: "pass", issues: [] };
+
+  const sourceMaterial = {
+    title: inputArticle.title,
+    summary: inputArticle.summary,
+    content: inputArticle.content,
+  };
+  const rewrittenMaterial = {
+    title: article.title,
+    oneSentence: article.oneSentence,
+    bodyBlocks: (Array.isArray(article.bodyBlocks) ? article.bodyBlocks : [])
+      .filter((block) => block?.type === "paragraph" || block?.type === "quote")
+      .map((block) => (block.type === "quote" ? { type: "quote", sourceText: block.sourceText } : { type: "paragraph", content: block.content })),
+    annotations: Array.isArray(article.annotations) ? article.annotations : [],
+  };
+
+  try {
+    const { systemPrompt, userPrompt } = await loadPromptPair("review", {
+      source_json: JSON.stringify(sourceMaterial),
+      rewritten_json: JSON.stringify(rewrittenMaterial),
+    });
+    const parsed = await callDeepSeekJson({
+      systemPrompt,
+      userPrompt,
+      stage: "review",
+      logMeta: {
+        articleId: inputArticle.id,
+        articleTitle: inputArticle.selection?.title || inputArticle.title,
+        attempt,
+      },
+    });
+
+    const verdict = String(parsed?.verdict ?? "pass").toLowerCase() === "fail" ? "fail" : "pass";
+    const issues = (Array.isArray(parsed?.issues) ? parsed.issues : [])
+      .slice(0, 5)
+      .map((issue) => ({
+        quote: String(issue?.quote ?? "").slice(0, 160),
+        problem: String(issue?.problem ?? ""),
+        evidence: String(issue?.evidence ?? "").slice(0, 200),
+      }))
+      .filter((issue) => issue.problem);
+
+    // fail 但没给出任何具体 issue 的返回不可信，按 pass 处理。
+    if (verdict === "fail" && issues.length === 0) return { verdict: "pass", issues: [] };
+    return { verdict, issues };
+  } catch (error) {
+    console.warn(
+      `[review] 忠实性复核调用失败，本篇放行（article=${inputArticle.id}）：${normalizeError(error)}`,
+    );
+    return { verdict: "pass", issues: [], skipped: true };
+  }
+}
+
 function buildRewriteInputArticle(article, { contentChars, selection }) {
   return {
     id: article.id,
@@ -739,9 +850,9 @@ async function callDeepSeekForRewriteArticle(inputArticle, { attempt, previousIs
   });
   const retryInstruction =
     previousIssues.length > 0
-      ? `\n\n上一次返回没有通过结构校验，问题如下：\n${previousIssues
+      ? `\n\n上一次返回没有通过校验（结构校验或忠实性复核），问题如下：\n${previousIssues
           .map((issue) => `- ${issue}`)
-          .join("\n")}\n请只转写这 1 篇文章，并严格满足 bodyBlocks、annotations、pmTakeaways、image block 和中文忠实转写要求。`
+          .join("\n")}\n请只转写这 1 篇文章，修正上述问题，并严格满足 bodyBlocks、annotations、pmTakeaways、image block 和中文忠实转写要求；凡是原文材料中不存在的具体事实、数字和案例一律不要写。`
       : "";
 
   return callDeepSeekJson({
@@ -947,17 +1058,26 @@ async function callDeepSeekJsonOnce({ systemPrompt, userPrompt, stage, logMeta =
 }
 
 async function loadPromptPair(stage, variables) {
-  const systemPromptPath =
-    stage === "select"
-      ? path.resolve(env.LLM_SELECT_SYSTEM_PROMPT_PATH ?? env.FRIDAY_SELECT_SYSTEM_PROMPT_PATH ?? defaultSelectSystemPromptPath)
-      : path.resolve(env.LLM_REWRITE_SYSTEM_PROMPT_PATH ?? env.FRIDAY_REWRITE_SYSTEM_PROMPT_PATH ?? defaultRewriteSystemPromptPath);
-  const userPromptPath =
-    stage === "select"
-      ? path.resolve(env.LLM_SELECT_USER_PROMPT_PATH ?? env.FRIDAY_SELECT_USER_PROMPT_PATH ?? defaultSelectUserPromptPath)
-      : path.resolve(env.LLM_REWRITE_USER_PROMPT_PATH ?? env.FRIDAY_REWRITE_USER_PROMPT_PATH ?? defaultRewriteUserPromptPath);
+  const promptPaths = {
+    select: {
+      system: env.LLM_SELECT_SYSTEM_PROMPT_PATH ?? env.FRIDAY_SELECT_SYSTEM_PROMPT_PATH ?? defaultSelectSystemPromptPath,
+      user: env.LLM_SELECT_USER_PROMPT_PATH ?? env.FRIDAY_SELECT_USER_PROMPT_PATH ?? defaultSelectUserPromptPath,
+    },
+    rewrite: {
+      system: env.LLM_REWRITE_SYSTEM_PROMPT_PATH ?? env.FRIDAY_REWRITE_SYSTEM_PROMPT_PATH ?? defaultRewriteSystemPromptPath,
+      user: env.LLM_REWRITE_USER_PROMPT_PATH ?? env.FRIDAY_REWRITE_USER_PROMPT_PATH ?? defaultRewriteUserPromptPath,
+    },
+    review: {
+      system: env.LLM_REVIEW_SYSTEM_PROMPT_PATH ?? defaultReviewSystemPromptPath,
+      user: env.LLM_REVIEW_USER_PROMPT_PATH ?? defaultReviewUserPromptPath,
+    },
+  };
+  const paths = promptPaths[stage];
+  if (!paths) throw new Error(`Unknown prompt stage: ${stage}`);
+
   const [systemPrompt, userTemplate] = await Promise.all([
-    fs.readFile(systemPromptPath, "utf8"),
-    fs.readFile(userPromptPath, "utf8"),
+    fs.readFile(path.resolve(paths.system), "utf8"),
+    fs.readFile(path.resolve(paths.user), "utf8"),
   ]);
 
   return {
@@ -1808,8 +1928,23 @@ async function ensureSupabaseSourcesSeeded(supabase) {
   const { data: existingRows, error } = await supabase.from("trendlens_sources").select("id");
   if (error) throw error;
 
+  // 用户删除过的信源记录在 tombstones 表里，seed 时跳过，避免 yaml 里的老信源被复活。
+  // 表尚未创建时按无墓碑处理（部署顺序兼容）。
+  const tombstonedIds = new Set();
+  try {
+    const { data: tombstoneRows, error: tombstoneError } = await supabase
+      .from("trendlens_source_tombstones")
+      .select("id");
+    if (tombstoneError) throw tombstoneError;
+    for (const row of tombstoneRows ?? []) tombstonedIds.add(String(row.id));
+  } catch (tombstoneError) {
+    console.warn(`[sources] 读取信源墓碑失败，按无墓碑处理：${normalizeError(tombstoneError)}`);
+  }
+
   const existingIds = new Set((existingRows ?? []).map((row) => String(row.id)));
-  const missingSources = sources.filter((source) => !existingIds.has(String(source.id)));
+  const missingSources = sources.filter(
+    (source) => !existingIds.has(String(source.id)) && !tombstonedIds.has(String(source.id)),
+  );
 
   if (!missingSources.length) return;
 
@@ -1855,14 +1990,14 @@ async function writeJson(filePath, value) {
 }
 
 async function writeModelLog(stage, entry) {
-  if (stage !== "rewrite") return;
+  if (stage !== "rewrite" && stage !== "review") return;
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = [timestamp, entry.articleId, entry.attempt ? `attempt-${entry.attempt}` : "", entry.event]
     .filter(Boolean)
     .map((part) => safeFilePart(part))
     .join("-");
-  const filePath = path.join(logsDir, `deepseek-rewrite-${suffix}-${crypto.randomUUID().slice(0, 8)}.json`);
+  const filePath = path.join(logsDir, `deepseek-${stage}-${suffix}-${crypto.randomUUID().slice(0, 8)}.json`);
   const body = {
     version: 1,
     stage,

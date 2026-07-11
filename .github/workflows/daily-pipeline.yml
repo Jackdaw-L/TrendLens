@@ -46,10 +46,13 @@ jobs:
       FRIDAY_REWRITE_CONTENT_CHARS: "12000"
       FRIDAY_REWRITE_MIN_CHINESE_CHARS: "800"
       FRIDAY_MIN_CONTENT_CHARS: "400"
+      REWRITE_REVIEW_ENABLED: "1"
       LLM_SELECT_SYSTEM_PROMPT_PATH: prompts/select-system.md
       LLM_SELECT_USER_PROMPT_PATH: prompts/select-user.md
       LLM_REWRITE_SYSTEM_PROMPT_PATH: prompts/rewrite-system.md
       LLM_REWRITE_USER_PROMPT_PATH: prompts/rewrite-user.md
+      LLM_REVIEW_SYSTEM_PROMPT_PATH: prompts/review-system.md
+      LLM_REVIEW_USER_PROMPT_PATH: prompts/review-user.md
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

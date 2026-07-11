@@ -65,6 +65,14 @@ export async function deleteSource(id: string) {
     const { error } = await supabase.from("trendlens_sources").delete().eq("id", id);
 
     if (!error) {
+      // 写墓碑：阻止流水线按 sources.yaml 增量 seed 时把删除过的信源复活。
+      const { error: tombstoneError } = await supabase
+        .from("trendlens_source_tombstones")
+        .upsert({ id, deleted_at: new Date().toISOString() }, { onConflict: "id" });
+      if (tombstoneError) {
+        console.warn(`Failed to record TrendLens source tombstone: ${tombstoneError.message}`);
+      }
+
       const sources = await loadSourceConfigsFromSupabase();
       if (sources.length > 0) return sources;
     }

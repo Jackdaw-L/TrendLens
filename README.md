@@ -25,9 +25,10 @@ TrendLens 的内容生产链路在 `scripts/pipeline.mjs`：
 1. 从 Supabase 的 `trendlens_sources` 读取启用的信息源，失败时回退到 `sources.yaml`。
 2. 拉取 RSS item，并尽量抓取原文 HTML。
 3. 用 Readability 抽取正文和图片。
-4. 调用 DeepSeek 做两段处理：
-   - selection：从候选文章中选出推荐列表。
+4. 调用 DeepSeek 做三段处理：
+   - selection：结合每周维护的兴趣画像，从候选文章中选出推荐列表。
    - rewrite：逐篇做忠实中文转写、注释、图片位置和 PM Takeaways。
+   - review：逐篇忠实性复核，对照原文查编造/错乱，不过则打回重写；累计 3 次不过的文章不进日推。
 5. 写入 Supabase：
    - `trendlens_radar_runs`
    - `trendlens_articles`
@@ -36,6 +37,20 @@ TrendLens 的内容生产链路在 `scripts/pipeline.mjs`：
 7. 线上应用读取 Supabase 最新 run；若不可用，回退到 `data/radar.json`，再回退到内置 demo 数据。
 
 抓取和转写默认并发执行（信源级 `FETCH_SOURCE_CONCURRENCY=4`、单信源内文章 `FETCH_ARTICLE_CONCURRENCY=3`、DeepSeek 逐篇转写 `REWRITE_CONCURRENCY=2`），可按需调小以规避限流。
+
+## 每周画像任务
+
+`scripts/weekly-profile.mjs` 由 `.github/workflows/weekly-profile.yml` 每周日 21:07（北京时间）运行，构成「消费行为反哺筛选」的闭环：
+
+1. 统计近 14 天行为：收藏（强正信号）、已读、展示未读（弱负信号）、各信源阅读率。
+2. 调用 DeepSeek 生成兴趣画像和日推筛选策略，写入 `trendlens_profile`；次日选文 prompt 自动注入最新画像。
+3. 在夹板内自动微调信源权重（单次 ±0.2，范围 0.5~1.6，展示数不足 5 的信源不动）。
+4. 扫描信源健康度：连续失败 ≥ 7 次的信源生成「建议删除」提案。
+5. 按画像推荐最多 2 个新信源（feed 经实际抓取验证），生成「建议新增」提案。
+
+增删提案写入 `trendlens_source_proposals`，在设置页信息源列表上方展示，由用户逐条「添加/删除/忽略」确认后才生效；被删除的信源会记入 `trendlens_source_tombstones`，避免被 `sources.yaml` 的增量 seed 复活。
+
+本地调试：`node scripts/weekly-profile.mjs --dry-run`（正常读数据、调模型，但不写库）。
 
 ## 代码结构
 
@@ -47,6 +62,7 @@ src/app/
   articles/[id]/page.tsx   文章详情页
   api/radar/route.ts       获取最新推荐数据
   api/sources/route.ts     信息源启停、删除（写操作需口令）
+  api/source-proposals/    信源增删提案的查看与确认（写操作需口令）
   api/favorites/route.ts   收藏读取与增删（写操作需口令）
   api/reading/route.ts     已读状态读取与上报（写操作需口令）
   api/auth/verify/route.ts 校验操作口令
@@ -65,6 +81,7 @@ src/components/
 src/lib/
   radar-store.ts           从 Supabase、本地 JSON、demo 加载推荐数据
   source-store.ts          信息源读取和管理
+  proposal-store.ts        信源增删提案的读取与确认执行
   reading-store.ts         已读状态的 Supabase 读写
   api-auth.ts              写操作口令校验（服务端）
   app-secret.ts            操作口令的本机存储（客户端）
@@ -72,11 +89,14 @@ src/lib/
   radar-data.ts            demo 数据与类型定义
 
 scripts/
-  pipeline.mjs             RSS 抓取、DeepSeek 处理、Supabase 写入
+  pipeline.mjs             RSS 抓取、DeepSeek 选文/转写/复核、Supabase 写入
+  weekly-profile.mjs       每周兴趣画像、信源权重微调、信源健康度与增删提案
 
 prompts/
-  select-*.md              选文 prompt
+  select-*.md              选文 prompt（注入兴趣画像）
   rewrite-*.md             中文转写 prompt
+  review-*.md              转写忠实性复核 prompt
+  profile-*.md             每周画像 prompt
 
 supabase/
   schema.sql               当前数据表结构
