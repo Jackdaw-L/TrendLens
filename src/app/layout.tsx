@@ -1,6 +1,15 @@
 import type { Metadata, Viewport } from "next";
+import { Manrope } from "next/font/google";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
 import "./globals.css";
+
+// 构建时下载并自托管 Manrope（可变字体，覆盖 400-800 字重），
+// 运行时零外部字体请求；中文仍走 font-family 后备栈里的 PingFang SC。
+const manrope = Manrope({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-manrope",
+});
 
 export const metadata: Metadata = {
   title: "TrendLens",
@@ -35,7 +44,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html className={manrope.variable} lang="zh-CN">
       <body>
         {children}
         <ServiceWorkerRegistration />

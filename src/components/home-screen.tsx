@@ -1,8 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Lightbulb, Clock3, ArrowRight } from "lucide-react";
 import {
   AppShell,
@@ -18,6 +17,9 @@ import { useReadingState } from "@/components/use-reading-state";
 import { getArticleHeatScore, type Article } from "@/lib/radar-data";
 import type { RadarDataset } from "@/lib/radar-store";
 
+// 首屏数据超过该时长时，挂载后自动拉一次最新（SW 秒开的可能是缓存的旧页面）。
+const AUTO_REFRESH_STALE_MS = 10 * 60 * 1000;
+
 export function HomeScreen({
   dataset,
   favoriteIds,
@@ -25,10 +27,9 @@ export function HomeScreen({
   dataset: RadarDataset;
   favoriteIds: string[];
 }) {
-  const router = useRouter();
   const reading = useReadingState();
   const favorites = useFavorites(favoriteIds);
-  const { isRead } = reading;
+  const { isRead, markRefresh } = reading;
   const [currentDataset, setCurrentDataset] = useState(dataset);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
@@ -40,39 +41,45 @@ export function HomeScreen({
     setCurrentDataset(dataset);
   }, [dataset]);
 
+  const refreshList = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      setRefreshing(true);
+      if (!silent) setRefreshError(false);
+
+      try {
+        const response = await fetch(`/api/radar?refresh=${Date.now()}`, {
+          cache: "no-store",
+          headers: {
+            accept: "application/json",
+          },
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const nextDataset = (await response.json()) as RadarDataset;
+        setCurrentDataset(nextDataset);
+        setRefreshError(false);
+        markRefresh();
+      } catch {
+        // 自动刷新失败保持静默：继续展示缓存内容即可（例如离线打开）。
+        if (!silent) setRefreshError(true);
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [markRefresh],
+  );
+
+  // SW 会先用缓存秒开页面（可能是昨天的推荐）：数据一旦偏旧就自动确认一次最新，
+  // 刷新按钮的转圈和状态行时间戳的变化对用户可见，不做无预告的整页闪变。
   useEffect(() => {
-    router.prefetch("/saved");
-    router.prefetch("/settings");
-    currentDataset.articles.forEach((article) => {
-      router.prefetch(`/articles/${article.id}`);
-    });
-  }, [currentDataset.articles, router]);
-
-  async function refreshList() {
-    setRefreshing(true);
-    setRefreshError(false);
-
-    try {
-      const response = await fetch(`/api/radar?refresh=${Date.now()}`, {
-        cache: "no-store",
-        headers: {
-          accept: "application/json",
-        },
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const nextDataset = (await response.json()) as RadarDataset;
-      setCurrentDataset(nextDataset);
-      reading.markRefresh();
-    } catch {
-      setRefreshError(true);
-    } finally {
-      setRefreshing(false);
+    const generatedAt = new Date(dataset.generatedAt).getTime();
+    if (!Number.isFinite(generatedAt) || Date.now() - generatedAt > AUTO_REFRESH_STALE_MS) {
+      void refreshList({ silent: true });
     }
-  }
+  }, [dataset.generatedAt, refreshList]);
 
   return (
     <AppShell>
-      <TopAppBar action={<RefreshButton busy={refreshing} onClick={refreshList} />} />
+      <TopAppBar action={<RefreshButton busy={refreshing} onClick={() => void refreshList()} />} />
 
       <section className="dashboard-header" aria-label="今日推荐状态">
         <p className="sync-line">

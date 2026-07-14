@@ -83,3 +83,29 @@ jobs:
 
           curl -fsS -X POST "$TRENDLENS_REVALIDATE_URL" \
             -H "authorization: Bearer $TRENDLENS_REVALIDATE_TOKEN"
+
+      # 重新验证之后主动访问一遍关键页面，把新鲜 ISR 结果提前烤进 CDN，
+      # 避免早晨第一位访问者（也就是用户本人）撞上冷函数 SSR 的 2~4 秒 TTFB。
+      - name: Warm up production cache
+        env:
+          TRENDLENS_REVALIDATE_URL: ${{ secrets.TRENDLENS_REVALIDATE_URL }}
+        run: |
+          BASE_URL="${TRENDLENS_REVALIDATE_URL%/api/revalidate}"
+          if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "$TRENDLENS_REVALIDATE_URL" ]; then
+            BASE_URL="https://trendlensapp.netlify.app"
+          fi
+          echo "Warming $BASE_URL"
+
+          curl -fsS -o /dev/null -m 30 "$BASE_URL/" || echo "warmup / failed"
+          curl -fsS -o /dev/null -m 30 "$BASE_URL/saved" || echo "warmup /saved failed"
+          curl -fsS -o /dev/null -m 30 "$BASE_URL/settings" || echo "warmup /settings failed"
+
+          if curl -fsS -m 30 "$BASE_URL/api/radar" -o /tmp/radar.json; then
+            for id in $(jq -r '.articles[].id' /tmp/radar.json | head -12); do
+              curl -fsS -o /dev/null -m 30 "$BASE_URL/articles/$id" \
+                && echo "warmed /articles/$id" \
+                || echo "warmup /articles/$id failed"
+            done
+          else
+            echo "warmup skipped: /api/radar unreachable"
+          fi
