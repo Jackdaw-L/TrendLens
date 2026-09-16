@@ -1,11 +1,13 @@
 name: Update TrendLens interest profile
 
 on:
-  schedule:
-    # 21:07 Asia/Shanghai, Sunday. 周一早上的日推即可用上新画像。GitHub cron 用 UTC。
-    - cron: "7 13 * * 0"
+  # Supabase Cron dispatches on Sunday at 21:07 Asia/Shanghai.
   workflow_dispatch:
     inputs:
+      job_id:
+        description: Supabase scheduled job ID (empty for a manual run)
+        required: false
+        default: ""
       reason:
         description: Why this run was started
         required: false
@@ -20,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      TRENDLENS_JOB_ID: ${{ inputs.job_id }}
       DEEPSEEK_API_URL: https://api.deepseek.com/chat/completions
       DEEPSEEK_MODEL: deepseek-v4-pro
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -48,4 +51,4 @@ jobs:
         run: pnpm install --prod --no-frozen-lockfile --ignore-scripts
 
       - name: Update interest profile, source weights, and source proposals
-        run: node scripts/weekly-profile.mjs
+        run: node scripts/run-job.mjs weekly

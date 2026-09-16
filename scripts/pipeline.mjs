@@ -7,6 +7,8 @@ import YAML from "yaml";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { createClient } from "@supabase/supabase-js";
+import { requestDeepSeekJson } from "./lib/deepseek-client.mjs";
+import { assessSourceMaterial, failedArticleIds, rewriteRequirements } from "./lib/article-quality.mjs";
 
 const cwd = process.cwd();
 const dataDir = path.join(cwd, "data");
@@ -544,8 +546,14 @@ function imageIdentity(value) {
 
 async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles }) {
   const minContentChars = positiveInteger(env.FRIDAY_MIN_CONTENT_CHARS, 600);
+  const failedIds = await loadFailedArticleIds();
   const qualified = fetched.articles
-    .filter((article) => article.title && normalizeText(article.content).length >= minContentChars)
+    .filter((article) => {
+      const quality = assessSourceMaterial(article, minContentChars);
+      const reason = failedIds.has(article.id) ? "failure_cooldown" : quality.reason;
+      if (reason) console.log(`[candidate] skip ${article.id}: ${reason}`);
+      return article.title && !reason;
+    })
     .sort((a, b) => (b.sourceWeight ?? 1) - (a.sourceWeight ?? 1));
 
   // 在交给 DeepSeek 选文之前，先剔除最近 N 天已推荐过的文章，避免跨天重复推荐。
@@ -586,6 +594,21 @@ async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles
       fridayError: normalizeError(error),
     });
   }
+}
+
+async function loadFailedArticleIds() {
+  const supabase = createSupabaseClientFromEnv();
+  const days = Number(env.FAILED_ARTICLE_COOLDOWN_DAYS ?? 7);
+  if (!supabase || days <= 0) return new Set();
+  const { data, error } = await supabase.from("trendlens_radar_runs")
+    .select("rewrite_failures")
+    .gte("generated_at", new Date(Date.now() - days * 86400000).toISOString());
+  if (error) throw new Error(`读取失败文章冷却记录失败：${error.message}`);
+  const { data: jobs, error: jobError } = await supabase.from("trendlens_job_runs")
+    .select("rewrite_failures")
+    .gte("created_at", new Date(Date.now() - days * 86400000).toISOString());
+  if (jobError) throw new Error(`读取任务失败文章记录失败：${jobError.message}`);
+  return failedArticleIds([...(data ?? []), ...(jobs ?? [])]);
 }
 
 // 从候选文章中剔除最近 dedupLookbackDays 天内已推荐过的文章。
@@ -702,9 +725,20 @@ async function callDeepSeekForRewrite(selection, articles) {
     }),
   );
 
+  const failures = results.filter((result) => result.failure).map((result) => result.failure);
+  if (env.TRENDLENS_JOB_ID && failures.length) {
+    const db = createSupabaseClientFromEnv();
+    const { data: previous, error: readError } = await db.from("trendlens_job_runs")
+      .select("rewrite_failures").eq("id", env.TRENDLENS_JOB_ID).single();
+    if (readError) throw new Error(`读取任务失败记录失败：${readError.message}`);
+    const combined = [...new Map([...(previous.rewrite_failures ?? []), ...failures].map((failure) => [failure.id, failure])).values()];
+    const { error } = await db.from("trendlens_job_runs")
+      .update({ rewrite_failures: combined }).eq("id", env.TRENDLENS_JOB_ID);
+    if (error) throw new Error(`保存失败文章冷却记录失败：${error.message}`);
+  }
   return {
     articles: results.filter((result) => result.article).map((result) => result.article),
-    failures: results.filter((result) => result.failure).map((result) => result.failure),
+    failures,
   };
 }
 
@@ -755,6 +789,7 @@ async function rewriteSingleArticle(sourceArticle, { contentChars, maxAttempts, 
         parsedJson: rewrite,
       });
     } catch (error) {
+      if (error.nonRetryable) throw error;
       lastError = normalizeError(error);
       lastIssues = [lastError];
     }
@@ -822,6 +857,7 @@ async function reviewRewrittenArticle(article, inputArticle, { attempt }) {
     if (verdict === "fail" && issues.length === 0) return { verdict: "pass", issues: [] };
     return { verdict, issues };
   } catch (error) {
+    if (error.nonRetryable) throw error;
     console.warn(
       `[review] 忠实性复核调用失败，本篇放行（article=${inputArticle.id}）：${normalizeError(error)}`,
     );
@@ -840,6 +876,8 @@ function buildRewriteInputArticle(article, { contentChars, selection }) {
     summary: article.summary || article.excerpt,
     content: article.content.slice(0, contentChars),
     sourceImages: (article.images ?? []).slice(0, 8),
+    requirements: rewriteRequirements(article.content.slice(0, contentChars),
+      positiveInteger(env.FRIDAY_REWRITE_MIN_CHINESE_CHARS, 800)),
     selection,
   };
 }
@@ -881,6 +919,7 @@ async function callDeepSeekJson({ systemPrompt, userPrompt, stage, logMeta = {} 
         logMeta: { ...logMeta, apiAttempt: attempt },
       });
     } catch (error) {
+      if (error.nonRetryable) throw error;
       lastError = error;
       if (attempt >= maxAttempts) break;
       await delay(Math.min(2000 * attempt, 6000));
@@ -891,170 +930,10 @@ async function callDeepSeekJson({ systemPrompt, userPrompt, stage, logMeta = {} 
 }
 
 async function callDeepSeekJsonOnce({ systemPrompt, userPrompt, stage, logMeta = {} }) {
-  const startedAt = new Date().toISOString();
-  const thinkingType = env.DEEPSEEK_THINKING ?? "disabled";
-  const timeoutMs = positiveInteger(env.DEEPSEEK_TIMEOUT_MS, stage === "select" ? 120000 : 180000);
-  const requestBody = {
-    model: env.DEEPSEEK_MODEL ?? "deepseek-v4-pro",
-    stream: false,
-    max_tokens: Number(env.DEEPSEEK_MAX_TOKENS ?? env.FRIDAY_MAX_TOKENS ?? 12000),
-    response_format: { type: "json_object" },
-    thinking: { type: thinkingType },
-    messages: [
-      {
-        role: "system",
-        content: systemPrompt,
-      },
-      { role: "user", content: userPrompt },
-    ],
-  };
-
-  if (thinkingType === "enabled") {
-    requestBody.reasoning_effort = env.DEEPSEEK_REASONING_EFFORT ?? "high";
-  } else {
-    requestBody.temperature = Number(env.DEEPSEEK_TEMPERATURE ?? 0.2);
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-
-  try {
-    response = await fetch(env.DEEPSEEK_API_URL ?? "https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    const respondedAt = new Date().toISOString();
-    const message =
-      error instanceof Error && error.name === "AbortError"
-        ? `DeepSeek ${stage} timed out after ${timeoutMs}ms`
-        : `DeepSeek ${stage} request failed: ${normalizeError(error)}`;
-
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: false,
-      model: requestBody.model,
-      timeoutMs,
-      error: message,
-    });
-    throw new Error(message);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const respondedAt = new Date().toISOString();
-
-  if (!response.ok) {
-    const responseText = await response.text();
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: false,
-      status: response.status,
-      statusText: response.statusText,
-      model: requestBody.model,
-      rawApiResponse: responseText,
-      error: `DeepSeek ${stage} HTTP ${response.status}`,
-    });
-    throw new Error(`DeepSeek ${stage} HTTP ${response.status}: ${responseText}`);
-  }
-
-  const responseText = await response.text();
-  if (!responseText.trim()) {
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: true,
-      status: response.status,
-      statusText: response.statusText,
-      model: requestBody.model,
-      rawApiResponse: responseText,
-      error: `DeepSeek ${stage} returned empty response body`,
-    });
-    throw new Error(`DeepSeek ${stage} returned empty response body`);
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(responseText);
-  } catch (error) {
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: true,
-      status: response.status,
-      statusText: response.statusText,
-      model: requestBody.model,
-      rawApiResponse: responseText,
-      error: `DeepSeek ${stage} response is not JSON: ${normalizeError(error)}`,
-    });
-    throw new Error(
-      `DeepSeek ${stage} response is not JSON: ${normalizeError(error)}; preview=${responseText.slice(0, 240)}`,
-    );
-  }
-
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) {
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: true,
-      status: response.status,
-      statusText: response.statusText,
-      model: requestBody.model,
-      rawApiResponse: responseText,
-      apiPayload: payload,
-      error: `DeepSeek ${stage} response missing choices[0].message.content`,
-    });
-    throw new Error(`DeepSeek ${stage} response missing choices[0].message.content`);
-  }
-
-  let parsed;
-  try {
-    parsed = parseJsonFromModel(content);
-  } catch (error) {
-    await writeModelLog(stage, {
-      ...logMeta,
-      startedAt,
-      respondedAt,
-      ok: true,
-      status: response.status,
-      statusText: response.statusText,
-      model: requestBody.model,
-      rawApiResponse: responseText,
-      apiPayload: payload,
-      modelMessageContent: content,
-      error: normalizeError(error),
-    });
-    throw error;
-  }
-
-  await writeModelLog(stage, {
-    ...logMeta,
-    startedAt,
-    respondedAt,
-    ok: true,
-    status: response.status,
-    statusText: response.statusText,
-    model: requestBody.model,
-    rawApiResponse: responseText,
-    apiPayload: payload,
-    modelMessageContent: content,
-    parsedJson: parsed,
+  return requestDeepSeekJson({
+    env, supabase: createSupabaseClientFromEnv(), systemPrompt, userPrompt, stage, logMeta,
+    parseContent: parseJsonFromModel, writeLog: writeModelLog,
   });
-  return parsed;
 }
 
 async function loadPromptPair(stage, variables) {
@@ -1233,19 +1112,11 @@ function validateRewrittenArticle(article, inputArticle) {
   const images = blocks.filter((block) => block?.type === "image");
   const paragraphText = paragraphs.map((block) => block.content).join("");
   const paragraphChineseChars = countChineseChars(paragraphText);
-  const configuredMinChineseChars = positiveInteger(env.FRIDAY_REWRITE_MIN_CHINESE_CHARS, 800);
-  const sourceContentLength = normalizeText(inputArticle.content).length;
-  const minChineseChars =
-    sourceContentLength < 1200
-      ? Math.min(configuredMinChineseChars, 450)
-      : sourceContentLength < 4500
-        ? Math.min(configuredMinChineseChars, 500)
-        : configuredMinChineseChars;
-  const minAnnotations = sourceContentLength < 1200 ? 1 : sourceContentLength < 4500 ? 2 : 3;
+  const { minChineseChars, minParagraphs, minAnnotations } = inputArticle.requirements ??
+    rewriteRequirements(inputArticle.content, positiveInteger(env.FRIDAY_REWRITE_MIN_CHINESE_CHARS, 800));
   const sourceImageIds = new Set((inputArticle.sourceImages ?? []).map((image) => image.id));
 
-  if (blocks.length < 8) issues.push(`bodyBlocks 数量不足：${blocks.length}/8`);
-  if (paragraphs.length < 8) issues.push(`paragraph 数量不足：${paragraphs.length}/8`);
+  if (paragraphs.length < minParagraphs) issues.push(`paragraph 数量不足：${paragraphs.length}/${minParagraphs}`);
   if (paragraphChineseChars < minChineseChars) {
     issues.push(`中文正文不足：${paragraphChineseChars}/${minChineseChars}`);
   }
@@ -1797,11 +1668,15 @@ async function readLatestFetchedFromSupabase() {
 }
 
 async function persistPipelineResult({ fetched, radar }) {
+  if (env.TRENDLENS_REQUIRE_SUCCESS === "1" && (radar.mode !== "deepseek" || !radar.articles?.length)) {
+    throw new Error(radar.status.fridayError || radar.status.message || "未生成可发布的推荐，保留上一期数据。");
+  }
   const supabase = createSupabaseClientFromEnv();
   if (!supabase) {
     return { provider: "file", status: "skipped", reason: "Supabase env not configured" };
   }
 
+  let insertedRunId;
   try {
     await ensureSupabaseSourcesSeeded(supabase);
 
@@ -1809,7 +1684,7 @@ async function persistPipelineResult({ fetched, radar }) {
       .from("trendlens_radar_runs")
       .insert({
         version: radar.version ?? 1,
-        mode: radar.mode,
+        mode: "publishing",
         generated_at: radar.generatedAt,
         status: radar.status,
         topics: radar.topics ?? [],
@@ -1822,6 +1697,7 @@ async function persistPipelineResult({ fetched, radar }) {
       .single();
 
     if (runError) throw runError;
+    insertedRunId = run.id;
 
     await insertInBatches(
       supabase,
@@ -1870,9 +1746,14 @@ async function persistPipelineResult({ fetched, radar }) {
       })),
     );
 
+    const { error: publishError } = await supabase.from("trendlens_radar_runs")
+      .update({ mode: radar.mode }).eq("id", run.id);
+    if (publishError) throw publishError;
     const cleanup = await cleanupExpiredRuns(supabase);
     return { provider: "supabase", status: "ok", runId: run.id, cleanup };
   } catch (error) {
+    if (insertedRunId) await supabase.from("trendlens_radar_runs").delete().eq("id", insertedRunId);
+    if (env.TRENDLENS_REQUIRE_SUCCESS === "1") throw error;
     console.warn(`Failed to persist TrendLens data to Supabase: ${normalizeError(error)}`);
     return { provider: "supabase", status: "failed", error: normalizeError(error) };
   }
@@ -1990,8 +1871,6 @@ async function writeJson(filePath, value) {
 }
 
 async function writeModelLog(stage, entry) {
-  if (stage !== "rewrite" && stage !== "review") return;
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = [timestamp, entry.articleId, entry.attempt ? `attempt-${entry.attempt}` : "", entry.event]
     .filter(Boolean)

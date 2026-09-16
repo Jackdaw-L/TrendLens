@@ -155,3 +155,66 @@ grant select, insert, update, delete on public.trendlens_read_articles to servic
 grant select, insert, update, delete on public.trendlens_profile to service_role;
 grant select, insert, update, delete on public.trendlens_source_proposals to service_role;
 grant select, insert, update, delete on public.trendlens_source_tombstones to service_role;
+
+-- Task RPCs and private Cron dispatch functions are defined in migrations/.
+create table if not exists public.trendlens_job_runs (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('daily', 'weekly')),
+  scheduled_date date not null,
+  is_scheduled boolean not null default false,
+  status text not null default 'queued' check (status in ('queued', 'running', 'succeeded', 'failed')),
+  owner text,
+  dispatch_count integer not null default 0,
+  rewrite_failures jsonb not null default '[]'::jsonb,
+  request_id bigint,
+  last_dispatched_at timestamptz,
+  started_at timestamptz,
+  finished_at timestamptz,
+  error text,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists trendlens_job_runs_daily_key on public.trendlens_job_runs (kind, scheduled_date) where is_scheduled;
+create index if not exists trendlens_job_runs_created_idx on public.trendlens_job_runs (created_at desc);
+
+create table if not exists public.trendlens_job_alerts (
+  kind text not null check (kind in ('daily', 'weekly')),
+  scheduled_date date not null,
+  message text not null,
+  updated_at timestamptz not null default now(),
+  resolved_at timestamptz,
+  primary key (kind, scheduled_date)
+);
+
+create table if not exists public.trendlens_llm_usage (
+  id uuid primary key,
+  job_id uuid references public.trendlens_job_runs(id) on delete set null,
+  github_run_id text,
+  stage text not null check (stage in ('select', 'rewrite', 'review', 'profile')),
+  model text not null,
+  article_id text,
+  attempt integer not null default 1,
+  api_attempt integer not null default 1,
+  started_at timestamptz not null,
+  finished_at timestamptz,
+  latency_ms bigint,
+  status text not null check (status in ('started', 'succeeded', 'failed')),
+  http_status integer,
+  provider_request_id text,
+  usage_known boolean not null default false,
+  prompt_tokens bigint,
+  completion_tokens bigint,
+  cache_hit_tokens bigint,
+  cache_miss_tokens bigint,
+  pricing_period text not null check (pricing_period in ('peak', 'off_peak')),
+  rate_version text,
+  estimated_cost_cny numeric(18, 8),
+  error text
+);
+create index if not exists trendlens_llm_usage_started_idx on public.trendlens_llm_usage (started_at desc);
+create index if not exists trendlens_llm_usage_job_idx on public.trendlens_llm_usage (job_id);
+
+alter table public.trendlens_job_runs enable row level security;
+alter table public.trendlens_job_alerts enable row level security;
+alter table public.trendlens_llm_usage enable row level security;
+revoke all on public.trendlens_job_runs, public.trendlens_job_alerts, public.trendlens_llm_usage from anon, authenticated;
+grant select, insert, update, delete on public.trendlens_job_runs, public.trendlens_job_alerts, public.trendlens_llm_usage to service_role;

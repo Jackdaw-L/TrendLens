@@ -44,6 +44,7 @@ yarn-error.log*
 
 # netlify
 .netlify
+/supabase/.temp/
 
 # typescript
 *.tsbuildinfo

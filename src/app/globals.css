@@ -1527,3 +1527,14 @@ svg {
     border-radius: 24px 24px 0 0;
   }
 }
+.job-alerts {
+  margin-block: 16px;
+  padding: 8px 0 8px 12px;
+  border-left: 3px solid #a66338;
+  color: #613c25;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.job-alerts p { margin: 8px 0; }
+.job-alerts strong, .job-alerts span { display: block; overflow-wrap: anywhere; }

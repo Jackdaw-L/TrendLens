@@ -40,7 +40,7 @@ TrendLens 的内容生产链路在 `scripts/pipeline.mjs`：
 
 ## 每周画像任务
 
-`scripts/weekly-profile.mjs` 由 `.github/workflows/weekly-profile.yml` 每周日 21:07（北京时间）运行，构成「消费行为反哺筛选」的闭环：
+`scripts/weekly-profile.mjs` 每周日 21:07（北京时间）由 Supabase Cron 触发 GitHub Actions 运行，构成「消费行为反哺筛选」的闭环：
 
 1. 统计近 14 天行为：收藏（强正信号）、已读、展示未读（弱负信号）、各信源阅读率。
 2. 调用 DeepSeek 生成兴趣画像和日推筛选策略，写入 `trendlens_profile`；次日选文 prompt 自动注入最新画像。
@@ -83,14 +83,18 @@ src/lib/
   source-store.ts          信息源读取和管理
   proposal-store.ts        信源增删提案的读取与确认执行
   reading-store.ts         已读状态的 Supabase 读写
+  job-store.ts             自动更新异常状态，供设置页展示
   api-auth.ts              写操作口令校验（服务端）
   app-secret.ts            操作口令的本机存储（客户端）
   supabase-server.ts       Supabase admin client
   radar-data.ts            demo 数据与类型定义
 
 scripts/
+  run-job.mjs              领取任务、当天去重、记录执行成功或失败
   pipeline.mjs             RSS 抓取、DeepSeek 选文/转写/复核、Supabase 写入
   weekly-profile.mjs       每周兴趣画像、信源权重微调、信源健康度与增删提案
+  lib/deepseek-client.mjs  统一模型请求、超时、用量记录和峰谷费用估算
+  lib/article-quality.mjs  原文完整性、转写长度和失败冷却规则
 
 prompts/
   select-*.md              选文 prompt（注入兴趣画像）
@@ -100,6 +104,8 @@ prompts/
 
 supabase/
   schema.sql               当前数据表结构
+  migrations/              数据库升级记录（包含任务 RPC 和内部调度函数）
+  schedules.sql            北京时间日推 07:00、08:00 检查、每周日 21:07 画像
 ```
 
 ## 本地开发
@@ -115,6 +121,7 @@ npm run dev -- --hostname 0.0.0.0
 
 ```bash
 npm run lint
+npm test
 npm run build
 ```
 
@@ -132,7 +139,15 @@ npm run pipeline
 SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
 ```
 
-线上日更由 `.github/workflows/daily-pipeline.yml` 托管：每天北京时间 07:37 自动运行，目标是在 08:00 前完成更新；也可以在设置页输入口令触发。工作流完成后会调用 `/api/revalidate`，让页面尽快读取 Supabase 中的新结果。
+线上由 Supabase Cron 在每天北京时间 07:00 触发 `.github/workflows/daily-pipeline.yml`，08:00 检查，08:30 再检查状态；尚未成功时在 12:05 闲时补跑，12:35 复查。一天最多派发三次，已成功发布则停止补跑。周画像在周日 21:07 启动，21:37、22:17 检查并有限补跑，22:47 复查。GitHub workflow 只保留手动/外部触发，避免原生 schedule 的长时间延迟与不活跃停用。
+
+`run-job.mjs` 用数据库原子领取任务，避免重复派发造成重复模型消费；工作日高峰时段不启动新的自动模型调用。设置页的「更新推荐」仍立即执行一次手动更新，不受当天自动去重或错峰限制。任务失败或超时在设置页显示告警，成功后自动解除；未成功生成的结果不会替换上期推荐。这里的告警是应用内状态，不是邮件或手机通知。
+
+调度凭据加密存放在 Supabase Vault 的 `trendlens_github_actions_token`，只由内部调度函数读取。新环境应用迁移后，配置该凭据，再执行 `supabase/schedules.sql`。工作流完成后调用 `/api/revalidate` 并预热页面。
+
+模型调用按 `select / rewrite / review / profile` 写入 `trendlens_llm_usage`：开始/结束时间、任务、文章、尝试次数、缓存命中/未命中输入 tokens、输出 tokens、结果和估算费用。计费版本和峰谷时段一并留存；费用按请求开始时间估算，以 DeepSeek 账单为准。超时等拿不到 usage 的调用保留为未知，不能按零费用统计。数据不随 30 天推荐清理而删除。
+
+原文只有付费预览、订阅推广或抓取失败后的短摘要时，选文前跳过；累计三次转写失败的文章默认冷却 7 天。中文正文长度根据原文估算，保留截断校验，短文章不再统一凑满 800 字。
 
 ## Prompt 调优
 
@@ -141,7 +156,7 @@ LLM prompt 独立放在 `prompts/`，方便不改代码直接调：
 - `select-system.md` / `select-user.md`：决定哪些文章值得推荐。
 - `rewrite-system.md` / `rewrite-user.md`：决定中文转写、术语注释、图片插入和 PM Takeaways 的输出结构。
 
-模型原始返回日志会写到 `data/logs/deepseek-rewrite-*.json`，该目录不会提交到 Git。
+模型原始返回日志会写到 `data/logs/deepseek-*.json`，该目录不会提交到 Git。GitHub runner 上的原文日志仍是临时文件；长期统计使用 Supabase 中的用量表，不含原文或画像全文。
 
 ## 继续开发时优先看哪里
 

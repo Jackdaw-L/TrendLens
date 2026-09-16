@@ -16,6 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Parser from "rss-parser";
 import { createClient } from "@supabase/supabase-js";
+import { requestDeepSeekJson } from "./lib/deepseek-client.mjs";
 
 const cwd = process.cwd();
 const logsDir = path.join(cwd, "data", "logs");
@@ -481,60 +482,19 @@ async function loadPromptPair(stage, variables) {
 }
 
 async function callDeepSeekJson({ systemPrompt, userPrompt, stage }) {
-  if (!env.DEEPSEEK_API_KEY) {
-    throw new Error("缺少 DEEPSEEK_API_KEY 配置。");
-  }
-
+  if (!env.DEEPSEEK_API_KEY) throw new Error("缺少 DEEPSEEK_API_KEY 配置。");
   const maxAttempts = positiveInteger(env.DEEPSEEK_ATTEMPTS, 2);
-  const timeoutMs = positiveInteger(env.DEEPSEEK_TIMEOUT_MS, 180000);
-  let lastError = null;
-
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const startedAt = new Date().toISOString();
     try {
-      const requestBody = {
-        model: env.DEEPSEEK_MODEL ?? "deepseek-v4-pro",
-        stream: false,
-        max_tokens: Number(env.DEEPSEEK_MAX_TOKENS ?? 12000),
-        response_format: { type: "json_object" },
-        thinking: { type: env.DEEPSEEK_THINKING ?? "disabled" },
-        temperature: Number(env.DEEPSEEK_TEMPERATURE ?? 0.2),
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-      };
-      const response = await fetch(env.DEEPSEEK_API_URL ?? "https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
+      return await requestDeepSeekJson({
+        env, supabase: dryRun ? null : supabase, systemPrompt, userPrompt, stage,
+        logMeta: { apiAttempt: attempt }, parseContent: parseJsonFromModel, writeLog: writeModelLog,
       });
-      const responseText = await response.text();
-      if (!response.ok) throw new Error(`DeepSeek ${stage} HTTP ${response.status}: ${responseText.slice(0, 240)}`);
-
-      const payload = JSON.parse(responseText);
-      const content = payload.choices?.[0]?.message?.content;
-      if (!content) throw new Error(`DeepSeek ${stage} response missing content`);
-
-      const parsed = parseJsonFromModel(content);
-      await writeModelLog(stage, { startedAt, ok: true, modelMessageContent: content, parsedJson: parsed });
-      return parsed;
     } catch (error) {
-      lastError = error;
-      await writeModelLog(stage, { startedAt, ok: false, error: normalizeError(error) });
-      if (attempt < maxAttempts) await delay(2000 * attempt);
-    } finally {
-      clearTimeout(timeout);
+      if (error.nonRetryable || attempt === maxAttempts) throw error;
+      await delay(2000 * attempt);
     }
   }
-
-  throw lastError ?? new Error(`DeepSeek ${stage} failed`);
 }
 
 function parseJsonFromModel(content) {
@@ -588,11 +548,6 @@ function positiveInteger(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < 1) return fallback;
   return Math.floor(number);
-}
-
-function normalizeError(error) {
-  if (error instanceof Error) return error.message;
-  return String(error);
 }
 
 function delay(ms) {

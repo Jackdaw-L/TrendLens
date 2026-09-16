@@ -141,6 +141,7 @@ async function loadRadarDatasetFromSupabase({ fullArticles = true } = {}): Promi
   const { data: run, error: runError } = await supabase
     .from("trendlens_radar_runs")
     .select("*")
+    .neq("mode", "publishing")
     .order("generated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -308,6 +309,7 @@ async function getRuntimeArticleUncached(id: string) {
     const { data: run, error: runError } = await supabase
       .from("trendlens_radar_runs")
       .select("*")
+      .neq("mode", "publishing")
       .order("generated_at", { ascending: false })
       .limit(1)
       .maybeSingle();

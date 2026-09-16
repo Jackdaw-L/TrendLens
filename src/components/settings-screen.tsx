@@ -13,6 +13,7 @@ import {
 import { useReadingState } from "@/components/use-reading-state";
 import { appSecretHeaders, getAppSecret, setAppSecret } from "@/lib/app-secret";
 import type { SourceProposal } from "@/lib/proposal-store";
+import type { JobAlert } from "@/lib/job-store";
 import type { RadarDataset } from "@/lib/radar-store";
 import type { SourceConfig } from "@/lib/source-store";
 
@@ -33,10 +34,12 @@ export function SettingsScreen({
   dataset,
   initialSources,
   initialProposals = [],
+  alerts = [],
 }: {
   dataset: RadarDataset;
   initialSources: SourceConfig[];
   initialProposals?: SourceProposal[];
+  alerts?: JobAlert[];
 }) {
   const router = useRouter();
   const reading = useReadingState();
@@ -266,6 +269,17 @@ export function SettingsScreen({
         <StatusTile label="推荐文章" value={String(dataset.articles.length)} />
         <StatusTile label="模型状态" value={modelStatusText(dataset.status.friday)} />
       </section>
+
+      {alerts.length > 0 && (
+        <div className="job-alerts" role="status" aria-label="更新状态">
+          {alerts.map((alert) => (
+            <p key={`${alert.kind}:${alert.scheduled_date}`}>
+              <strong>{alert.scheduled_date.slice(5).replace("-", "/")} {alert.kind === "daily" ? "推荐更新" : "兴趣画像"}</strong>
+              <span>{alert.message}</span>
+            </p>
+          ))}
+        </div>
+      )}
 
       <div className="settings-actions">
         <button
