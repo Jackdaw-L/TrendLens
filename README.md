@@ -164,5 +164,5 @@ LLM prompt 独立放在 `prompts/`，方便不改代码直接调：
 - 想改文章详情体验：看 `src/components/article-screen.tsx`。
 - 想改推荐策略：优先改 `prompts/select-*.md`。
 - 想改转写结构：优先改 `prompts/rewrite-*.md` 和 `scripts/pipeline.mjs` 的校验逻辑。
-- 想调跨天去重：改环境变量 `DEDUP_LOOKBACK_DAYS`（默认 3 天，设为 0 关闭），逻辑在 `scripts/pipeline.mjs` 的 `excludeRecentlyRecommended`。
+- 已读文章始终排除，不受时间窗口限制；未读但已推荐的文章按 `DEDUP_LOOKBACK_DAYS` 去重（默认 3 天，0 仅关闭此窗口）。候选不足时少推，不回填旧文；历史记录读取失败时停止生成，保留上期结果。逻辑在 `scripts/lib/recommendation-history.mjs`。
 - 想改信息源管理：看 `src/lib/source-store.ts` 和 `src/app/api/sources/route.ts`。

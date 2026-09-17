@@ -8,6 +8,7 @@ import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { createClient } from "@supabase/supabase-js";
 import { requestDeepSeekJson } from "./lib/deepseek-client.mjs";
+import { excludeConsumedArticles } from "./lib/recommendation-history.mjs";
 import { assessSourceMaterial, failedArticleIds, rewriteRequirements } from "./lib/article-quality.mjs";
 
 const cwd = process.cwd();
@@ -556,10 +557,7 @@ async function generateRadar(fetched, { modelMaxArticles, modelCandidateArticles
     })
     .sort((a, b) => (b.sourceWeight ?? 1) - (a.sourceWeight ?? 1));
 
-  // 在交给 DeepSeek 选文之前，先剔除最近 N 天已推荐过的文章，避免跨天重复推荐。
-  const freshCandidates = await excludeRecentlyRecommended(qualified, {
-    maxArticles: modelMaxArticles,
-  });
+  const freshCandidates = await excludeRecentlyRecommended(qualified);
   const usable = freshCandidates.slice(0, modelCandidateArticles);
 
   if (usable.length === 0) {
@@ -611,54 +609,13 @@ async function loadFailedArticleIds() {
   return failedArticleIds([...(data ?? []), ...(jobs ?? [])]);
 }
 
-// 从候选文章中剔除最近 dedupLookbackDays 天内已推荐过的文章。
-// 兜底策略：如果剔重后新鲜候选不足以选出目标数量，则保留原候选，
-// 防止出现「推荐列表过少甚至为空」的极端情况。
-async function excludeRecentlyRecommended(candidates, { maxArticles }) {
-  if (dedupLookbackDays <= 0 || candidates.length === 0) return candidates;
-
-  const recommendedIds = await loadRecentlyRecommendedIds(dedupLookbackDays);
-  if (recommendedIds.size === 0) return candidates;
-
-  const deduped = candidates.filter((article) => !recommendedIds.has(article.id));
-  const removed = candidates.length - deduped.length;
-
-  if (deduped.length < maxArticles) {
-    console.warn(
-      `[dedup] 剔重后仅剩 ${deduped.length} 篇新鲜候选（目标 ${maxArticles} 篇），为避免推荐过少，本次保留全部 ${candidates.length} 篇候选。`,
-    );
-    return candidates;
-  }
-
-  if (removed > 0) {
-    console.log(`[dedup] 已剔除最近 ${dedupLookbackDays} 天内推荐过的 ${removed} 篇文章。`);
-  }
-  return deduped;
-}
-
-// 读取最近 days 天内 Supabase 中已落库（已推荐）的文章 id 集合。
-// 文章 id 由文章网址哈希得到（stableId），跨 run 稳定，因此可直接按 id 比对。
-async function loadRecentlyRecommendedIds(days) {
-  const supabase = createSupabaseClientFromEnv();
-  if (!supabase) return new Set();
-
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  try {
-    // 只统计转写成功的 run（deepseek / 历史遗留的 friday 模式）。
-    // 失败回退 run（fetched 模式）里的文章并没有真正被推荐过，
-    // 若计入去重，「失败后手动重跑」会把最优候选剔掉。
-    const { data, error } = await supabase
-      .from("trendlens_articles")
-      .select("id, created_at, trendlens_radar_runs!inner(mode)")
-      .in("trendlens_radar_runs.mode", ["deepseek", "friday"])
-      .gte("created_at", cutoff);
-    if (error) throw error;
-    return new Set((data ?? []).map((row) => String(row.id)));
-  } catch (error) {
-    // 去重属于「锦上添花」，读取失败时不应阻断主流程，退化为不去重。
-    console.warn(`[dedup] 读取历史推荐文章失败，本次跳过去重：${normalizeError(error)}`);
-    return new Set();
-  }
+async function excludeRecentlyRecommended(candidates) {
+  const fresh = await excludeConsumedArticles(candidates, {
+    supabase: createSupabaseClientFromEnv(),
+    lookbackDays: dedupLookbackDays,
+  });
+  console.log(`[dedup] 排除已读或近期已推荐 ${candidates.length - fresh.length} 篇，剩余 ${fresh.length} 篇；不足目标数量时不回填旧文。`);
+  return fresh;
 }
 
 async function callDeepSeekForSelection(articles, { maxArticles }) {
