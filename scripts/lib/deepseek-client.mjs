@@ -17,7 +17,11 @@ export function usageCost(usage, model, startedAt) {
     ? usage.prompt_cache_miss_tokens
     : prompt !== null && hit !== null ? prompt - hit : null;
   const known = prompt !== null && output !== null && hit !== null && miss !== null && miss >= 0;
-  const rates = model === "deepseek-v4-pro" ? [0.15, 4.5, 13.5] : null;
+  const pricing = {
+    "deepseek-v4-pro": { rates: [0.15, 4.5, 13.5], version: "deepseek-v4-pro-2026-09-16" },
+    "deepseek-flash": { rates: [0.02, 1, 4], version: "deepseek-flash-2026-10-21" },
+  }[model];
+  const rates = pricing?.rates;
   return {
     prompt_tokens: prompt,
     completion_tokens: output,
@@ -25,7 +29,7 @@ export function usageCost(usage, model, startedAt) {
     cache_miss_tokens: miss,
     usage_known: known,
     pricing_period: peak ? "peak" : "off_peak",
-    rate_version: rates ? "deepseek-v4-pro-2026-09-16" : null,
+    rate_version: pricing?.version ?? null,
     estimated_cost_cny: known && rates
       ? (hit * rates[0] + miss * rates[1] + output * rates[2]) * (peak ? 2 : 1) / 1e6
       : null,
@@ -38,7 +42,7 @@ export async function requestDeepSeekJson({ env, supabase, systemPrompt, userPro
     throw Object.assign(new Error("自动任务已进入高峰时段，停止新增模型调用，等待闲时补跑。"), { nonRetryable: true });
   }
   const startedAt = new Date().toISOString();
-  const model = env.DEEPSEEK_MODEL ?? "deepseek-v4-pro";
+  const model = env.DEEPSEEK_MODEL ?? "deepseek-flash";
   const timeoutMs = Number(env.DEEPSEEK_TIMEOUT_MS ?? 180000);
   const entry = {
     id: crypto.randomUUID(),

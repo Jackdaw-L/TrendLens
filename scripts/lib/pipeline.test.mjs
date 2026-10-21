@@ -20,6 +20,31 @@ test("cost accounts for cached input, output and unknown usage", () => {
   assert.equal(usageCost({ prompt_tokens: 100, completion_tokens: 50 }, "deepseek-v4-pro", new Date()).usage_known, false);
 });
 
+test("Flash pricing includes cached input and peak multiplier", () => {
+  const usage = { prompt_tokens: 1e6, prompt_cache_hit_tokens: 400000, prompt_cache_miss_tokens: 600000, completion_tokens: 100000 };
+  const off = usageCost(usage, "deepseek-flash", "2026-10-21T00:00:00Z");
+  assert.equal(off.estimated_cost_cny, 1.008);
+  assert.equal(off.rate_version, "deepseek-flash-2026-10-21");
+  assert.equal(usageCost(usage, "deepseek-flash", "2026-10-21T01:00:00Z").estimated_cost_cny, 2.016);
+  assert.equal(usageCost(null, "deepseek-flash", new Date()).estimated_cost_cny, null);
+});
+
+test("all task stages default to Flash with JSON and non-thinking mode", async () => {
+  for (const stage of ["select", "rewrite", "review", "profile"]) {
+    await requestDeepSeekJson({
+      env: {}, stage, systemPrompt: "JSON", userPrompt: "JSON",
+      writeLog: async () => {}, parseContent: JSON.parse,
+      fetchImpl: async (_, options) => {
+        const body = JSON.parse(options.body);
+        assert.equal(body.model, "deepseek-flash");
+        assert.deepEqual(body.thinking, { type: "disabled" });
+        assert.equal(body.response_format.type, "json_object");
+        return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }));
+      },
+    });
+  }
+});
+
 test("record billed usage even when model JSON is invalid", async () => {
   const rows = [];
   const db = { from: () => ({ upsert: async (row) => { rows.push(row); return { error: null }; } }) };

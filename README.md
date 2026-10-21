@@ -149,6 +149,8 @@ SOURCE_LIMIT=3 MAX_ITEMS_PER_SOURCE=1 LLM_MAX_ARTICLES=3 npm run pipeline
 
 原文只有付费预览、订阅推广或抓取失败后的短摘要时，选文前跳过；累计三次转写失败的文章默认冷却 7 天。中文正文长度根据原文估算，保留截断校验，短文章不再统一凑满 800 字。
 
+所有模型任务（选文、转写、复核、每周画像）默认使用 `deepseek-flash`，保持非思考模式。修改 `DEEPSEEK_MODEL` 时需同步本地环境与两个 GitHub Actions 工作流；费用估算按模型分别计价，不修改历史用量记录。
+
 ## Prompt 调优
 
 LLM prompt 独立放在 `prompts/`，方便不改代码直接调：

@@ -790,5 +790,5 @@ export const generationStatus = {
   recommendedCount: articles.length,
   trendCount: topics.length,
   parseFailureRate: "12%",
-  model: "deepseek-v4-pro",
+  model: "deepseek-flash",
 };

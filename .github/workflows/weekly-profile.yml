@@ -24,7 +24,7 @@ jobs:
     env:
       TRENDLENS_JOB_ID: ${{ inputs.job_id }}
       DEEPSEEK_API_URL: https://api.deepseek.com/chat/completions
-      DEEPSEEK_MODEL: deepseek-v4-pro
+      DEEPSEEK_MODEL: deepseek-flash
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       DEEPSEEK_THINKING: disabled
       DEEPSEEK_MAX_TOKENS: "12000"
